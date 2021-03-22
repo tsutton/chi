@@ -29,12 +29,13 @@ pub struct StateMachine {
 // TODO implement debug (must be manual due to Box<dyn ..>)
 pub struct Execution {
     machine: StateMachine,
-    // events: Vec<ExecutionEvent>,
+    events: Vec<ExecutionEvent>,
     resources: HashMap<String, Box<dyn MockResource>>,
     state: ExecutionState,
 }
 
 /// ExecutionState holds the information needed to advance an Execution by one step.
+///
 /// Usually, that consists of the name of the next state, and the input to pass that state.
 /// Or, the machine could have Succeeded or Failed with some output.
 /// Lastly, but most complicatedly, we could have several sub-executions ongoing, with Parallel and Map states.
@@ -64,7 +65,7 @@ impl Execution {
     ) -> Execution {
         Execution {
             machine: machine.clone(),
-            // events: Vec::new(),
+            events: Vec::new(),
             resources,
             state: ExecutionState::ExecuteState {
                 state_name: machine.start_at.clone(),
@@ -78,6 +79,15 @@ impl Execution {
     /// state within the innermost nesting is executed.
     /// No guarentees are made regarding the order of execution of the branches within a parallel or map.
     pub fn step(&mut self) -> bool {
+        if self.events.is_empty() {
+            if let ExecutionState::ExecuteState { input, .. } = &self.state {
+                self.events.push(ExecutionEvent::Started {
+                    input: input.clone(),
+                })
+            } else {
+                unreachable!("No execution events but not in a the initial ExecuteState")
+            }
+        }
         match &self.state {
             ExecutionState::Succeeded { .. } => true,
             ExecutionState::Failed { .. } => true,
@@ -87,34 +97,42 @@ impl Execution {
                     .states
                     .get(state_name)
                     .unwrap_or_else(|| panic!("missing state for {}", state_name));
+                self.events.push(ExecutionEvent::StateEntered {
+                    name: state_name.clone(),
+                    input: input.clone(),
+                    // parameters: effective_input.clone(),
+                });
                 match state {
                     State::Task(task) => {
                         let resource = self
                             .resources
                             .get_mut(&task.resource)
                             .unwrap_or_else(|| panic!("missing resource for {}", &task.resource));
-                        let input = match io::apply_input_path(&task.input_path, input) {
+                        let effective_input = match io::apply_input_path(&task.input_path, input) {
                             Ok(i) => i,
                             Err(_) => {
+                                let error = "States.Runtime".to_owned();
+                                let cause = "failed to apply input path".to_owned();
                                 self.state = ExecutionState::Failed {
-                                    error: "States.Runtime".to_owned(),
-                                    cause: "failed to apply input path".to_owned(),
+                                    error: error.clone(),
+                                    cause: cause.clone(),
                                 };
+                                self.events.push(ExecutionEvent::Failed { cause, error });
                                 return true;
                             }
                         };
-                        match resource.execute(&input) {
+                        match resource.execute(&effective_input) {
                             Ok(output) => {
-                                // self.events.push(ExecutionEvent::TaskStateSucceeded {
-                                //     state_name: state_name.to_owned(),
-                                //     input: input.clone(),
-                                //     output: output.clone(),
-                                // });
+                                self.events.push(ExecutionEvent::StateSucceeded {
+                                    name: state_name.to_owned(),
+                                    output: output.clone(),
+                                    // result: ...
+                                });
                                 match &task.transition {
                                     Transition::End(true) => {
-                                        // self.events.push(ExecutionEvent::ExecutionSucceeded {
-                                        //     output: output.clone(),
-                                        // });
+                                        self.events.push(ExecutionEvent::Succeeded {
+                                            output: output.clone(),
+                                        });
                                         self.state = ExecutionState::Succeeded { output };
                                         true
                                     }
@@ -130,26 +148,30 @@ impl Execution {
                                     }
                                 }
                             }
-                            Err(e) => {
-                                // self.events.push(ExecutionEvent::ExecutionFailed {
-                                //     error: e.clone(),
-                                //     cause: "TODO".to_owned(),
-                                // });
-                                self.state = ExecutionState::Failed {
-                                    error: e,
-                                    cause: "TODO".to_owned(),
-                                };
+                            Err(mock::Error { error, cause }) => {
+                                self.events.push(ExecutionEvent::Failed {
+                                    error: error.clone(),
+                                    cause: cause.to_owned(),
+                                });
+                                self.state = ExecutionState::Failed { error, cause };
                                 true
                             }
                         }
                     }
                     State::Succeed => {
+                        self.events.push(ExecutionEvent::Succeeded {
+                            output: input.clone(),
+                        });
                         self.state = ExecutionState::Succeeded {
                             output: input.clone(),
                         };
                         true
                     }
                     State::Fail { error, cause } => {
+                        self.events.push(ExecutionEvent::Failed {
+                            error: error.clone(),
+                            cause: cause.to_owned(),
+                        });
                         self.state = ExecutionState::Failed {
                             error: error.clone(),
                             cause: cause.clone(),
@@ -160,6 +182,10 @@ impl Execution {
                         for choice in &c.choices {
                             match choice.choice_expr.check(input) {
                                 Ok(true) => {
+                                    self.events.push(ExecutionEvent::StateSucceeded {
+                                        name: state_name.clone(),
+                                        output: input.clone(),
+                                    });
                                     self.state = ExecutionState::ExecuteState {
                                         state_name: choice.next.to_string(),
                                         input: input.clone(),
@@ -168,16 +194,28 @@ impl Execution {
                                 }
                                 Ok(false) => continue,
                                 Err(s) => {
-                                    self.state = ExecutionState::Failed {
-                                        error: "Choices failed".to_string(),
-                                        cause: format!("Choice state got error {}", s),
-                                    };
+                                    let error = "States.Runtime".to_owned();
+                                    let cause = format!("Choice state got error {}", s);
+                                    self.events.push(ExecutionEvent::StateFailed {
+                                        name: state_name.clone(),
+                                        cause: cause.to_owned(),
+                                        error: error.to_owned(),
+                                    });
+                                    self.events.push(ExecutionEvent::Failed {
+                                        cause: cause.to_owned(),
+                                        error: error.to_owned(),
+                                    });
+                                    self.state = ExecutionState::Failed { error, cause };
                                     return true;
                                 }
                             }
                         }
                         match &c.default {
                             Some(s) => {
+                                self.events.push(ExecutionEvent::StateSucceeded {
+                                    name: state_name.clone(),
+                                    output: input.clone(),
+                                });
                                 self.state = ExecutionState::ExecuteState {
                                     input: input.clone(),
                                     state_name: s.to_owned(),
@@ -185,14 +223,21 @@ impl Execution {
                                 false
                             }
                             None => {
-                                self.state = ExecutionState::Failed {
-                                    error: "States.NoChoiceMatched".to_owned(),
-                                    cause: "No choice matched.".to_owned(),
-                                };
+                                let error = "States.NoChoiceMatched".to_owned();
+                                let cause = "No choice matched.".to_owned();
+                                self.events.push(ExecutionEvent::StateFailed {
+                                    name: state_name.clone(),
+                                    cause: cause.to_owned(),
+                                    error: error.to_owned(),
+                                });
+                                self.events.push(ExecutionEvent::Failed {
+                                    cause: cause.to_owned(),
+                                    error: error.to_owned(),
+                                });
+                                self.state = ExecutionState::Failed { error, cause };
                                 false
                             }
                         }
-                        // defaul
                     }
                 }
             }
@@ -205,10 +250,8 @@ impl Execution {
     /// Runs the state machine to completion, returning its output.
     /// `run` merely calls `step`, so the caveats regarding execution order of Map and Parallel apply.
     pub fn run(&mut self) -> Result<Value, Value> {
-        loop {
-            if self.step() {
-                break;
-            }
+        while let false = self.step() {
+            // Keep going!
         }
         match &self.state {
             ExecutionState::Failed { cause, error } => Err(json!({"error": error, "cause": cause})),
@@ -218,35 +261,46 @@ impl Execution {
     }
 }
 
-// #[derive(Debug)]
-// enum ExecutionEvent {
-//     SucceedStateExecuted {
-//         state_name: String,
-//         input: Value,
-//         output: Value,
-//     },
-//     FailStateExecuted {
-//         state_name: String,
-//     },
-//     TaskStateSucceeded {
-//         state_name: String,
-//         input: Value,
-//         output: Value,
-//     },
-//     TaskStateFailed {
-//         state_name: String,
-//         input: Value,
-//         cause: String,
-//         error: String,
-//     },
-//     ExecutionSucceeded {
-//         output: Value,
-//     },
-//     ExecutionFailed {
-//         cause: String,
-//         error: String,
-//     },
-// }
+/// ExecutionEvent describes a progression of an execution.
+///
+/// It is intentionally verbose and redundant to allow for easier debugging, for example,
+/// It is redundant to give both the input and the parameters for StateEntered, because the
+/// parameters can be deduced by applying the state's InputPath and Parameters to the event's input.
+/// Similarly, giving the output of a state then the input of the next state is redudant, but can make debugging
+/// a key part of the state easier.
+///
+/// Multiple events can be emitted during a single execution step() call, for example if an end state is reached,
+/// events for the entering and exiting the states plus also an execution ending event will be added.
+// TODO remove allow(dead_code)
+#[allow(dead_code)]
+#[derive(Debug)]
+pub enum ExecutionEvent {
+    Started {
+        input: Value,
+    },
+    StateEntered {
+        name: String,
+        input: Value,
+        // parameters: Value,
+    },
+    StateSucceeded {
+        name: String,
+        // result: Value,
+        output: Value,
+    },
+    StateFailed {
+        name: String,
+        cause: String,
+        error: String,
+    },
+    Failed {
+        cause: String,
+        error: String,
+    },
+    Succeeded {
+        output: Value,
+    },
+}
 
 /// Type-safe version of "state can must have exactly one of End=true or Next=<next state>"
 /// TODO I'm modeling End(bool) since it makes serde easier, but does SFN allow "End"=false?
