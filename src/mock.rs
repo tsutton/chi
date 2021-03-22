@@ -1,12 +1,20 @@
 use serde_json::Value;
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Error {
+    pub error: String,
+    pub cause: String,
+}
+
+pub type Result = std::result::Result<Value, Error>;
+
 pub trait MockResource {
-    fn execute(&mut self, input: &Value) -> Result<Value, String>;
+    fn execute(&mut self, input: &Value) -> Result;
 }
 
 pub struct Identity {}
 impl MockResource for Identity {
-    fn execute(&mut self, input: &Value) -> Result<Value, String> {
+    fn execute(&mut self, input: &Value) -> Result {
         Ok(input.clone())
     }
 }
@@ -19,7 +27,7 @@ pub struct Constant {
     value: Value,
 }
 impl MockResource for Constant {
-    fn execute(&mut self, _: &Value) -> Result<Value, String> {
+    fn execute(&mut self, _: &Value) -> Result {
         Ok(self.value.clone())
     }
 }
@@ -38,16 +46,16 @@ struct Function<T> {
 
 impl<T> MockResource for Function<T>
 where
-    T: FnMut(&Value) -> Result<Value, String>,
+    T: FnMut(&Value) -> Result,
 {
-    fn execute(&mut self, input: &Value) -> Result<Value, String> {
+    fn execute(&mut self, input: &Value) -> Result {
         (self.func)(input)
     }
 }
 
 pub fn function<T>(func: T) -> Box<dyn MockResource>
 where
-    T: 'static + FnMut(&Value) -> Result<Value, String>,
+    T: 'static + FnMut(&Value) -> Result,
 {
     Box::new(Function { func })
 }
