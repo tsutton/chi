@@ -50,6 +50,9 @@ pub enum ChoiceExpr {
 /// It's an enum to capture the different tests supported by the Choice state.
 /// The body of each variant is typically the Rust type that corresponds with the JSON type
 /// except Number, cause JSON numbers are hard to model correctly.
+// TODO - write custom SerDe impls and change this to make the Abs vs Rel and the Op more orthogonal
+// Ideally there's an enum Op and a Test {a: AbsRel, o: Op}
+// (and no Path variants)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum DataTestExpression {

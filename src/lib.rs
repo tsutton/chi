@@ -504,6 +504,61 @@ mod tests {
         assert!(execution.run().is_err());
     }
 
+    // This is an end-to-end execution of a choice-state-based counter.
+    // It uses Choice to:
+    // 1. Initialize $.count to 0 if not present
+    // 2. Use a Task to add 1 to count until it's no longer less than 3
+    // 3. use a Succeed to return.
+    // It tests (some subset) of the execution control flow of Choice:
+    // That it chooses the correct next state based on th Choices and Default field.
+    // (Testing every single test expression is the domain of `mod choice`.)
+    #[test]
+    fn choice_loop() {
+        let machine = r#"
+    {
+      "StartAt": "choice",
+      "States": {
+        "choice": {
+          "Type": "Choice",
+          "Choices": [
+            { "Variable": "$.count", "IsPresent": false, "Next": "init"},
+            { "Variable": "$.count", "NumericLessThan": 3, "Next": "incr"}
+          ],
+          "Default": "final"
+        },
+        "incr": {"Type": "Task", "Resource": "incr", "Next": "choice"},
+        "init": {"Type": "Task", "Resource": "init", "Next": "choice"},
+        "final": {"Type": "Succeed"}
+      }
+    }"#;
+
+        #[derive(Debug, Deserialize, Serialize)]
+        struct IncrIO {
+            count: i64,
+        }
+
+        let machine: StateMachine = serde_json::from_str(machine).unwrap();
+        let mut resources = HashMap::new();
+        resources.insert("init".to_owned(), mock::constant(json!({"count": 0})));
+        resources.insert(
+            "incr".to_owned(),
+            mock::function(|v| {
+                let mut inp: IncrIO =
+                    serde_json::from_value(v.clone()).map_err(|e| mock::Error {
+                        error: "bad.input".to_owned(),
+                        cause: format!("{:?}", e),
+                    })?;
+                inp.count += 1;
+                Ok(serde_json::to_value(inp).unwrap())
+            }),
+        );
+        let mut execution = Execution::new(&machine, resources, &json!({}));
+        assert_eq!(execution.run(), Ok(json!({"count": 3})));
+        for e in execution.events.iter() {
+            println!("{:?}", e);
+        }
+    }
+
     // TODO more tests:
     // - Error handling
     // - Succeed and Fail states
