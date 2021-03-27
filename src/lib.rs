@@ -13,6 +13,8 @@ pub mod io;
 pub mod choice;
 pub use choice::*;
 
+pub mod spec;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct StateMachine {
@@ -25,7 +27,7 @@ pub struct StateMachine {
     pub timeout_seconds: Option<u32>,
 }
 
-// #[derive(Debug, Error)]
+// #[derive(Debug)]
 // TODO implement debug (must be manual due to Box<dyn ..>)
 pub struct Execution {
     machine: StateMachine,
@@ -391,13 +393,11 @@ mod tests {
 
     #[test]
     fn hello_world_execution() {
-        let resource_name = "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld";
-
         let machine = hello_world_machine();
 
         let mock_resource = mock::constant(json!("Hello, World!"));
         let mut resources = HashMap::new();
-        resources.insert(resource_name.to_owned(), mock_resource);
+        resources.insert(HELLO_WORLD_LAMBDA.to_owned(), mock_resource);
 
         let mut execution = Execution::new(&machine, resources, &Value::Null);
         let result = execution.run();
