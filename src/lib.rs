@@ -123,6 +123,23 @@ impl Execution {
                                 return true;
                             }
                         };
+                        let effective_input = match io::apply_parameters(
+                            &task.parameters,
+                            &effective_input,
+                            &json!({}),
+                        ) {
+                            Ok(i) => i,
+                            Err(_) => {
+                                let error = "States.Runtime".to_owned();
+                                let cause = "failed to apply parameters".to_owned();
+                                self.state = ExecutionState::Failed {
+                                    error: error.clone(),
+                                    cause: cause.clone(),
+                                };
+                                self.events.push(ExecutionEvent::Failed { cause, error });
+                                return true;
+                            }
+                        };
                         match resource.execute(&effective_input) {
                             Ok(output) => {
                                 self.events.push(ExecutionEvent::StateSucceeded {
@@ -326,10 +343,11 @@ pub enum AbsRel<T> {
 #[serde(rename_all = "PascalCase")]
 pub struct Task {
     pub comment: Option<String>,
-    #[serde(flatten)]
-    pub transition: Transition,
     pub resource: String,
     pub input_path: io::InputPath,
+    pub parameters: Option<Value>,
+    #[serde(flatten)]
+    pub transition: Transition,
     // pub timeout_seconds: OptionAbsRel<u32>,
     // pub heartbeat_seconds: AbsRel<u32>,
 }
@@ -378,6 +396,7 @@ mod tests {
             transition: Transition::End(true),
             resource: HELLO_WORLD_LAMBDA.to_owned(),
             input_path: None,
+            parameters: None,
         });
         let mut states = HashMap::new();
         states.insert("Hello World".to_owned(), t);
