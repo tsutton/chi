@@ -10,21 +10,22 @@ use crate::{Execution, StateMachine};
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct Specs {
-    specs: Vec<Spec>,
+    pub specs: Vec<Spec>,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub struct Spec {
-    resources: HashMap<String, Resource>,
-    input: Value,
-    expected: EndState,
+    pub resources: HashMap<String, Resource>,
+    pub input: Value,
+    pub expected: EndState,
+    pub name: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub enum EndState {
-    Success { output: Value },
+    Success(Value),
     Failure { error: String, cause: String },
 }
 
@@ -86,14 +87,14 @@ impl Spec {
         let mut execution = Execution::new(machine, resources, &self.input);
         match (&execution.run(), &self.expected) {
             // passing cases:
-            (Ok(got), EndState::Success { output }) if output == got => Ok(()),
+            (Ok(got), EndState::Success(output)) if output == got => Ok(()),
             (Err(v), EndState::Failure { error, cause })
                 if v["error"] == json!(error) && v["cause"] == json!(cause) =>
             {
                 Ok(())
             }
             // failing cases
-            (Ok(got), EndState::Success { output }) => Err(
+            (Ok(got), EndState::Success(output)) => Err(
                 // TODO better JSON diffs
                 format!(
                     "expected success with output {}, got success with output {}",
@@ -164,6 +165,7 @@ mod test {
 
     fn spec_with_expected(expected: EndState) -> Spec {
         Spec {
+            name: "spec".to_string(),
             resources: [
                 ("init".to_string(), Resource::Constant(json!({"count": 0}))),
                 (
@@ -208,15 +210,11 @@ mod test {
     }"#;
         let machine: StateMachine = serde_json::from_str(machine_str).unwrap();
 
-        let spec = spec_with_expected(EndState::Success {
-            output: json!({"count": 3}),
-        });
+        let spec = spec_with_expected(EndState::Success(json!({"count": 3})));
         let result = spec.run(&machine);
         assert!(result.is_ok());
 
-        let spec = spec_with_expected(EndState::Success {
-            output: json!({"count": 2}),
-        });
+        let spec = spec_with_expected(EndState::Success(json!({"count": 2})));
         let result = spec.run(&machine);
         println!("{:?}", &result);
         assert!(result.is_err());

@@ -1,0 +1,34 @@
+{
+  "StartAt": "choice",
+  "States": {
+    "choice": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.count",
+          "IsPresent": false,
+          "Next": "init"
+        },
+        {
+          "Variable": "$.count",
+          "NumericLessThan": 3,
+          "Next": "incr"
+        }
+      ],
+      "Default": "final"
+    },
+    "incr": {
+      "Type": "Task",
+      "Resource": "incr",
+      "Next": "choice"
+    },
+    "init": {
+      "Type": "Task",
+      "Resource": "init",
+      "Next": "choice"
+    },
+    "final": {
+      "Type": "Succeed"
+    }
+  }
+}

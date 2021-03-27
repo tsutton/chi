@@ -1,0 +1,45 @@
+Specs:
+- Name: first-spec
+  Input: {}
+  Resources:
+    init:
+      Constant: {"count": 0}
+    incr:
+      Match:
+        Cases:
+          - Predicate: >-
+              .count == 0
+            Function:
+              Constant: {"count": 1}
+        Default:
+          Jq: >-
+            setpath(["count"]; .count + 1)
+  Expected:
+    Success: {"count": 3}
+- Name: second-spec
+  Input: {}
+  Resources:
+    init:
+      Constant: {"count": 0}
+    incr:
+      Match:
+        Cases:
+          - Predicate: >-
+              .count == 0
+            Function:
+              Constant: {"count": 1}
+        Default:
+          Jq: >-
+            setpath(["count"]; .count + 1)
+  Expected:
+    Success: {"count": 2}
+- Name: third-spec
+  Input: {}
+  Resources:
+    init:
+      Constant: {"count": 0}
+    incr:
+      Jq: >-
+        setpath(["count"]; .count + 4)
+  Expected:
+    Success: {"count": 4}
