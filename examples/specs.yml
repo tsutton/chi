@@ -3,14 +3,14 @@ Specs:
   Input: {}
   Resources:
     init:
-      Constant: {"count": 0}
+      Succeed: {"count": 0}
     incr:
       Match:
         Cases:
           - Predicate: >-
               .count == 0
             Function:
-              Constant: {"count": 1}
+              Succeed: {"count": 1}
         Default:
           Jq: >-
             setpath(["count"]; .count + 1)
@@ -20,14 +20,14 @@ Specs:
   Input: {}
   Resources:
     init:
-      Constant: {"count": 0}
+      Succeed: {"count": 0}
     incr:
       Match:
         Cases:
           - Predicate: >-
               .count == 0
             Function:
-              Constant: {"count": 1}
+              Succeed: {"count": 1}
         Default:
           Jq: >-
             setpath(["count"]; .count + 1)
@@ -37,7 +37,7 @@ Specs:
   Input: {}
   Resources:
     init:
-      Constant: {"count": 0}
+      Succeed: {"count": 0}
     incr:
       Jq: >-
         setpath(["count"]; .count + 4)

@@ -32,7 +32,8 @@ pub enum EndState {
 #[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "PascalCase")]
 pub enum Resource {
-    Constant(Value),
+    Succeed(Value),
+    Fail { error: String, cause: String },
     Match(Match),
     Jq(String),
 }
@@ -40,7 +41,13 @@ pub enum Resource {
 impl Resource {
     pub fn into_mock_resource(self) -> Box<dyn MockResource> {
         match self {
-            Resource::Constant(v) => mock::constant(v),
+            Resource::Succeed(v) => mock::constant(v),
+            Resource::Fail { error, cause } => mock::function(move |_| {
+                Err(mock::Error {
+                    error: error.to_owned(),
+                    cause: cause.to_owned(),
+                })
+            }),
             Resource::Jq(filter) => mock::function(move |input| {
                 jq::run(&filter, input).map_err(|e| mock::Error {
                     cause: e.to_string(),
@@ -167,13 +174,13 @@ mod test {
         Spec {
             name: "spec".to_string(),
             resources: [
-                ("init".to_string(), Resource::Constant(json!({"count": 0}))),
+                ("init".to_string(), Resource::Succeed(json!({"count": 0}))),
                 (
                     "incr".to_string(),
                     Resource::Match(Match {
                         cases: vec![MatchCase {
                             predicate: ".count == 0".to_string(),
-                            function: Box::new(Resource::Constant(json!({"count": 1}))),
+                            function: Box::new(Resource::Succeed(json!({"count": 1}))),
                         }],
                         default: Box::new(Resource::Jq(
                             r#"setpath(["count"]; .count + 1)"#.to_owned(),
