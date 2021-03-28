@@ -4,6 +4,7 @@ use std::io::Read;
 use chi::spec::Specs;
 use chi::StateMachine;
 use clap::{App, Arg};
+use serde::de::DeserializeOwned;
 
 fn main() {
     let matches = App::new("chi")
@@ -25,10 +26,10 @@ fn main() {
         .get_matches();
 
     let machine_file_name = matches.value_of("state-machine").unwrap();
-    let machine = parse_machine(machine_file_name).unwrap();
+    let machine: StateMachine = parse_from_file(machine_file_name).unwrap();
 
     let tests_filename = matches.value_of("tests").unwrap();
-    let tests = parse_specs(tests_filename).unwrap();
+    let tests: Specs = parse_from_file(tests_filename).unwrap();
 
     for spec in tests.specs {
         match spec.run(&machine) {
@@ -42,19 +43,10 @@ fn main() {
     }
 }
 
-// TODO clean this up, there's some lifetime thing that makes "deser a T from a file" hard to write
-fn parse_machine(filename: &str) -> Result<StateMachine, String> {
-    let mut file =
-        File::open(filename).map_err(|e| format!("Opening file {} failed: {}", filename, e))?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf)
-        .map_err(|e| format!("Reading file {}: {}", filename, e))?;
-
-    serde_yaml::from_str(&buf).map_err(|e| format!("Deserializing file {}: {}", filename, e))
-}
-
-fn parse_specs(filename: &str) -> Result<Specs, String> {
+fn parse_from_file<T>(filename: &str) -> Result<T, String>
+where
+    T: DeserializeOwned,
+{
     let mut file =
         File::open(filename).map_err(|e| format!("Opening file {} failed: {}", filename, e))?;
 
