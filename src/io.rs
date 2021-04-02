@@ -91,6 +91,22 @@ pub fn apply_parameters(
     }
 }
 
+pub fn apply_results_path(
+    input: &Value,
+    output: &Value,
+    path: &InputPath,
+) -> Result<Value, StateIOError> {
+    // if path is null, do input
+    // if it is exactly $, do output
+    // if it is $.(something).(....)
+    match path {
+        None => Ok(output.clone()),
+        Some(Value::Null) => Ok(input.clone()),
+        // TODO support non-null results_path
+        _ => Err(StateIOError::PathFailure),
+    }
+}
+
 #[cfg(test)]
 mod test {
     use serde_json::Value;
@@ -224,4 +240,7 @@ mod test {
             assert_eq!(result, test.expected, "{}", test.description);
         }
     }
+
+    // TODO tests for apply_results_path
+
 }

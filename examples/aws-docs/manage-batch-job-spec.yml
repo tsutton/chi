@@ -1,0 +1,24 @@
+Version: 0.1.0
+Specs:
+- Name: Happy Path
+  Resources:
+    arn:aws:states:::batch:submitJob.sync:
+      Succeed: {}
+    arn:aws:states:::sns:publish:
+      Jq: "."
+  Input: {}
+  Expected:
+    Success:
+      Message: Batch job submitted through Step Functions succeeded
+      TopicArn: arn:aws:sns:us-east-1:123456789012:batchjobnotificatiointemplate-SNSTopic-1J757CVBQ2KHM
+- Name: Sad Path
+  Resources:
+    arn:aws:states:::batch:submitJob.sync:
+      Fail: {"error": "Batch.SubmitJobError", "cause": "Something bad happened."}
+    arn:aws:states:::sns:publish:
+      Jq: "."
+  Input: {}
+  Expected:
+    Success:
+      Message: Batch job submitted through Step Functions failed
+      TopicArn: arn:aws:sns:us-east-1:123456789012:batchjobnotificatiointemplate-SNSTopic-1J757CVBQ2KHM

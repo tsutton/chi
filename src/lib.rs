@@ -1,3 +1,4 @@
+use io::apply_results_path;
 // #![warn(missing_debug_implementations, rust_2018_idioms)]
 // #![warn(missing_docs)]
 use serde::{Deserialize, Serialize};
@@ -52,10 +53,12 @@ pub enum ExecutionState {
     ExecuteState {
         state_name: String,
         input: Value,
+        retried_errors: Vec<u32>,
     },
     AdvanceNestedState {
         state_name: String,
         executions: Vec<Execution>,
+        retried_errors: Vec<String>,
     },
 }
 
@@ -72,8 +75,20 @@ impl Execution {
             state: ExecutionState::ExecuteState {
                 state_name: machine.start_at.clone(),
                 input: input.clone(),
+                retried_errors: vec![],
             },
         }
+    }
+
+    fn fail(&mut self, error: &str, cause: &str) {
+        self.state = ExecutionState::Failed {
+            error: error.to_owned(),
+            cause: cause.to_owned(),
+        };
+        self.events.push(ExecutionEvent::Failed {
+            cause: cause.to_owned(),
+            error: error.to_owned(),
+        });
     }
 
     /// step advances the execution by a little bit and returns true if the execution has ended.
@@ -90,10 +105,14 @@ impl Execution {
                 unreachable!("No execution events but not in a the initial ExecuteState")
             }
         }
-        match &self.state {
+        match &mut self.state {
             ExecutionState::Succeeded { .. } => true,
             ExecutionState::Failed { .. } => true,
-            ExecutionState::ExecuteState { state_name, input } => {
+            ExecutionState::ExecuteState {
+                state_name,
+                input,
+                retried_errors,
+            } => {
                 let state = self
                     .machine
                     .states
@@ -113,13 +132,7 @@ impl Execution {
                         let effective_input = match io::apply_input_path(&task.input_path, input) {
                             Ok(i) => i,
                             Err(_) => {
-                                let error = "States.Runtime".to_owned();
-                                let cause = "failed to apply input path".to_owned();
-                                self.state = ExecutionState::Failed {
-                                    error: error.clone(),
-                                    cause: cause.clone(),
-                                };
-                                self.events.push(ExecutionEvent::Failed { cause, error });
+                                self.fail("States.Runtime", "failed to apply input path");
                                 return true;
                             }
                         };
@@ -130,16 +143,11 @@ impl Execution {
                         ) {
                             Ok(i) => i,
                             Err(_) => {
-                                let error = "States.Runtime".to_owned();
-                                let cause = "failed to apply parameters".to_owned();
-                                self.state = ExecutionState::Failed {
-                                    error: error.clone(),
-                                    cause: cause.clone(),
-                                };
-                                self.events.push(ExecutionEvent::Failed { cause, error });
+                                self.fail("States.Runtime", "Failed to apply parameters: {}");
                                 return true;
                             }
                         };
+
                         match resource.execute(&effective_input) {
                             Ok(output) => {
                                 self.events.push(ExecutionEvent::StateSucceeded {
@@ -162,18 +170,55 @@ impl Execution {
                                         self.state = ExecutionState::ExecuteState {
                                             state_name: next.clone(),
                                             input: output,
+                                            retried_errors: vec![],
                                         };
                                         false
                                     }
                                 }
                             }
                             Err(mock::Error { error, cause }) => {
-                                self.events.push(ExecutionEvent::Failed {
-                                    error: error.clone(),
-                                    cause: cause.to_owned(),
-                                });
-                                self.state = ExecutionState::Failed { error, cause };
-                                true
+                                // TODO events
+                                retried_errors.resize(task.retry.len(), 0);
+                                match should_retry(&error, &retried_errors, &task.retry) {
+                                    Some(i) => {
+                                        retried_errors[i] += 1;
+                                        false
+                                    }
+                                    None => {
+                                        match task.catch.iter().find(|catcher| {
+                                            catcher.error_equals.iter().any(|err_name| {
+                                                err_name == "States.ALL" || err_name == &error
+                                            })
+                                        }) {
+                                            Some(catcher) => {
+                                                let next_input = match apply_results_path(
+                                                    input,
+                                                    &json!({"error": error, "cause": cause}),
+                                                    &catcher.result_path,
+                                                ) {
+                                                    Ok(i) => i,
+                                                    Err(_) => {
+                                                        self.fail(
+                                                            "States.ResultsPathMatchFailure",
+                                                            "Failed to apply results_path",
+                                                        );
+                                                        return true;
+                                                    }
+                                                };
+                                                self.state = ExecutionState::ExecuteState {
+                                                    state_name: catcher.next.clone(),
+                                                    input: next_input,
+                                                    retried_errors: vec![],
+                                                };
+                                                false
+                                            }
+                                            None => {
+                                                self.fail(&error, &cause);
+                                                true
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -208,6 +253,7 @@ impl Execution {
                                     self.state = ExecutionState::ExecuteState {
                                         state_name: choice.next.to_string(),
                                         input: input.clone(),
+                                        retried_errors: vec![],
                                     };
                                     return false;
                                 }
@@ -220,11 +266,7 @@ impl Execution {
                                         cause: cause.to_owned(),
                                         error: error.to_owned(),
                                     });
-                                    self.events.push(ExecutionEvent::Failed {
-                                        cause: cause.to_owned(),
-                                        error: error.to_owned(),
-                                    });
-                                    self.state = ExecutionState::Failed { error, cause };
+                                    self.fail(&error, &cause);
                                     return true;
                                 }
                             }
@@ -238,6 +280,7 @@ impl Execution {
                                 self.state = ExecutionState::ExecuteState {
                                     input: input.clone(),
                                     state_name: s.to_owned(),
+                                    retried_errors: vec![],
                                 };
                                 false
                             }
@@ -249,11 +292,7 @@ impl Execution {
                                     cause: cause.to_owned(),
                                     error: error.to_owned(),
                                 });
-                                self.events.push(ExecutionEvent::Failed {
-                                    cause: cause.to_owned(),
-                                    error: error.to_owned(),
-                                });
-                                self.state = ExecutionState::Failed { error, cause };
+                                self.fail(&error, &cause);
                                 false
                             }
                         }
@@ -278,6 +317,24 @@ impl Execution {
             _ => unreachable!("not in a final state after running to completing"),
         }
     }
+}
+
+// should_retry returns either Some of the index of the applicable retrier, or None if the error should not be retried.
+// retry_counts is the number of times each retrier has been uesd.
+fn should_retry(error: &str, retry_counts: &[u32], retries: &[Retry]) -> Option<usize> {
+    for (i, retry) in retries.iter().enumerate() {
+        if retry_counts[i] == retry.max_attempts {
+            continue;
+        }
+        if retry
+            .error_equals
+            .iter()
+            .any(|e| e == "States.ALL" || e == error)
+        {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// ExecutionEvent describes a progression of an execution.
@@ -324,6 +381,7 @@ pub enum ExecutionEvent {
 /// Type-safe version of "state can must have exactly one of End=true or Next=<next state>"
 /// TODO I'm modeling End(bool) since it makes serde easier, but does SFN allow "End"=false?
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase")]
 pub enum Transition {
     Next(String),
     End(bool),
@@ -346,11 +404,51 @@ pub struct Task {
     pub resource: String,
     pub input_path: io::InputPath,
     pub parameters: Option<Value>,
+
+    #[serde(default)]
+    pub retry: Vec<Retry>,
+
+    #[serde(default)]
+    pub catch: Vec<Catch>,
+
     #[serde(flatten)]
     pub transition: Transition,
     // pub timeout_seconds: OptionAbsRel<u32>,
     // pub heartbeat_seconds: AbsRel<u32>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Retry {
+    error_equals: Vec<String>,
+    #[serde(default = "const_three")]
+    max_attempts: u32,
+    #[serde(default = "const_one")]
+    inteval_seconds: u32,
+    #[serde(default = "const_2_0")]
+    backoff_rate: serde_json::Number,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Catch {
+    error_equals: Vec<String>,
+    next: String,
+    result_path: io::InputPath,
+}
+
+fn const_three() -> u32 {
+    3
+}
+
+fn const_one() -> u32 {
+    3
+}
+
+fn const_2_0() -> serde_json::Number {
+    serde_json::Number::from_f64(2.0).unwrap()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Choice {
@@ -397,6 +495,8 @@ mod tests {
             resource: HELLO_WORLD_LAMBDA.to_owned(),
             input_path: None,
             parameters: None,
+            retry: vec![],
+            catch: vec![],
         });
         let mut states = HashMap::new();
         states.insert("Hello World".to_owned(), t);
@@ -578,8 +678,131 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retries_simple() {
+        #[rustfmt::skip]
+        let machine = r#"{
+            "StartAt": "main",
+            "States": {
+              "main": {
+                "Type": "Task",
+                "Resource": "fails",
+		"End": true,
+                "Retry": [{
+		    "ErrorEquals": ["my_error"]
+		}]
+              }
+            }
+        }"#;
+
+        let machine: StateMachine = serde_json::from_str(machine).unwrap();
+        if let State::Task(task) = machine.states.get("main").unwrap() {
+            eprintln!("{:?}", task.retry);
+        } else {
+            unreachable!();
+        }
+
+        fn fails_n_times(n: u32) -> Box<dyn MockResource> {
+            let mut count = 0;
+            mock::function(move |_| {
+                eprintln!("called with count={}", count);
+                if count < n {
+                    count += 1;
+                    Err(mock::Error {
+                        error: "my_error".to_owned(),
+                        cause: "".to_owned(),
+                    })
+                } else {
+                    Ok(json!(count))
+                }
+            })
+        }
+
+        let mut resources = HashMap::new();
+        resources.insert("fails".to_owned(), fails_n_times(3));
+
+        let mut execution = Execution::new(&machine, resources, &json!({}));
+        assert_eq!(execution.run(), Ok(json!(3)));
+
+        let mut resources = HashMap::new();
+        resources.insert("fails".to_owned(), fails_n_times(4));
+
+        let mut execution = Execution::new(&machine, resources, &json!({}));
+        assert_eq!(
+            execution.run(),
+            Err(json!({
+              "error": "my_error","cause": ""
+            }),)
+        );
+    }
+
+    #[test]
+    fn retries_complex() {
+        #[rustfmt::skip]
+        let machine = r#"{
+            "StartAt": "main",
+            "States": {
+              "main": {
+                "Type": "Task",
+                "Resource": "fails",
+		"End": true,
+                "Retry": [
+                  {
+                    "ErrorEquals": [ "ErrorA", "ErrorB" ],
+                    "IntervalSeconds": 1,
+                    "BackoffRate": 2,
+                    "MaxAttempts": 2
+                  },
+                  {
+                    "ErrorEquals": [ "ErrorC" ],
+                    "IntervalSeconds": 5
+                  }
+                ],
+                "Catch": [
+                  {
+                    "ErrorEquals": [ "States.ALL" ],
+                    "Next": "Z"
+                  }
+                ]
+              },
+              "Z": {
+                "Type": "Task",
+		"End": true,
+                "Resource": "error_info"
+              }
+            }
+        }"#;
+
+        let machine: StateMachine = serde_json::from_str(machine).unwrap();
+
+        let error_sequence = vec!["ErrorA", "ErrorB", "ErrorC", "ErrorB"];
+        let mut count = 0;
+        let res = mock::function(move |_| {
+            eprintln!("called with count={}", count);
+            let error = error_sequence[count].to_owned();
+            count += 1;
+            Err(mock::Error {
+                error,
+                cause: format!("{}", count),
+            })
+        });
+
+        let mut resources = HashMap::new();
+        resources.insert("fails".to_owned(), res);
+
+        resources.insert("error_info".to_owned(), mock::identity());
+
+        let mut execution = Execution::new(&machine, resources, &json!({}));
+        assert_eq!(
+            execution.run(),
+            Ok(json!({
+                "error": "ErrorB".to_owned(),
+                "cause": "4",
+            }))
+        );
+    }
+
     // TODO more tests:
-    // - Error handling
     // - Succeed and Fail states
     // - Refactor tests into Table, with common resources
 }
