@@ -1,10 +1,9 @@
-use io::apply_results_path;
 // #![warn(missing_debug_implementations, rust_2018_idioms)]
 // #![warn(missing_docs)]
+use io::apply_results_path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-// use thiserror::Error;
 
 pub mod mock;
 use mock::MockResource;
@@ -121,7 +120,6 @@ impl Execution {
                 self.events.push(ExecutionEvent::StateEntered {
                     name: state_name.clone(),
                     input: input.clone(),
-                    // parameters: effective_input.clone(),
                 });
                 match state {
                     State::Task(task) => {
@@ -387,16 +385,6 @@ pub enum Transition {
     End(bool),
 }
 
-/// AbsRel is for a few fields that have both an absolute and a relative version.
-/// For example, Task states can have either TimeoutSeconds OR TimeoutSecondsPath, same with HeartbeatSeconds
-#[derive(Debug, Clone)]
-pub enum AbsRel<T> {
-    Absolute(T),
-    Relative(String), // TODO or json path
-}
-
-// impl for resolving an AbsRel against our JSON Value
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Task {
@@ -413,8 +401,6 @@ pub struct Task {
 
     #[serde(flatten)]
     pub transition: Transition,
-    // pub timeout_seconds: OptionAbsRel<u32>,
-    // pub heartbeat_seconds: AbsRel<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

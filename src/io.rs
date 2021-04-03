@@ -242,5 +242,4 @@ mod test {
     }
 
     // TODO tests for apply_results_path
-
 }

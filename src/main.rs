@@ -12,6 +12,7 @@ fn main() {
         .arg(
             Arg::with_name("state-machine")
                 .short("s")
+                .long("state-machine")
                 .required(true)
                 .takes_value(true)
                 .help("path to state machine"),
@@ -19,6 +20,7 @@ fn main() {
         .arg(
             Arg::with_name("tests")
                 .short("t")
+                .long("tests")
                 .required(true)
                 .takes_value(true)
                 .help("path to test config"),
