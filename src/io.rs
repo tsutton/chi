@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateIOError {
+pub enum StateIoError {
     PathFailure,
 }
 
@@ -12,19 +12,19 @@ pub enum StateIOError {
 // TODO should this be an alias for ease of use? or a newtpe for safety?
 pub type InputPath = Option<Value>;
 
-pub fn apply_input_path(input_path: &InputPath, input: &Value) -> Result<Value, StateIOError> {
+pub fn apply_input_path(input_path: &InputPath, input: &Value) -> Result<Value, StateIoError> {
     match input_path {
         None => Ok(input.clone()),
         Some(Value::Null) => Ok(json!({})),
         Some(Value::String(s)) => {
             let r = jsonpath_lib::select(input, &s);
             match r {
-                Err(_) => Err(StateIOError::PathFailure),
+                Err(_) => Err(StateIoError::PathFailure),
                 Ok(v) if v.len() == 1 => Ok(v[0].clone()),
-                Ok(_) => Err(StateIOError::PathFailure),
+                Ok(_) => Err(StateIoError::PathFailure),
             }
         }
-        _ => Err(StateIOError::PathFailure),
+        _ => Err(StateIoError::PathFailure),
     }
 }
 
@@ -40,7 +40,7 @@ pub fn apply_parameters(
     parameters: &Parameters,
     input: &Value,
     context: &Value,
-) -> Result<Value, StateIOError> {
+) -> Result<Value, StateIoError> {
     match parameters {
         None => Ok(input.clone()),
         Some(parameters) => {
@@ -65,17 +65,17 @@ pub fn apply_parameters(
                             continue;
                         }
                         let field = field.strip_suffix(".$").unwrap().to_owned();
-                        let value = value.as_str().ok_or(StateIOError::PathFailure)?;
+                        let value = value.as_str().ok_or(StateIoError::PathFailure)?;
                         let transformed_value = if value.starts_with("$$") {
                             let selector = value.strip_prefix('$').unwrap();
                             match jsonpath_lib::select(context, selector) {
                                 Ok(selected) if selected.len() == 1 => selected[0].clone(),
-                                _ => return Err(StateIOError::PathFailure),
+                                _ => return Err(StateIoError::PathFailure),
                             }
                         } else if value.starts_with('$') {
                             match jsonpath_lib::select(input, value) {
                                 Ok(selected) if selected.len() == 1 => selected[0].clone(),
-                                _ => return Err(StateIOError::PathFailure),
+                                _ => return Err(StateIoError::PathFailure),
                             }
                         } else {
                             todo!("intrinsic functions")
@@ -95,7 +95,7 @@ pub fn apply_results_path(
     input: &Value,
     output: &Value,
     path: &InputPath,
-) -> Result<Value, StateIOError> {
+) -> Result<Value, StateIoError> {
     // if path is null, do input
     // if it is exactly $, do output
     // if it is $.(something).(....)
@@ -103,7 +103,7 @@ pub fn apply_results_path(
         None => Ok(output.clone()),
         Some(Value::Null) => Ok(input.clone()),
         // TODO support non-null results_path
-        _ => Err(StateIOError::PathFailure),
+        _ => Err(StateIoError::PathFailure),
     }
 }
 
@@ -118,7 +118,7 @@ mod test {
         struct Test {
             input: Value,
             path: InputPath,
-            expected: Result<Value, StateIOError>,
+            expected: Result<Value, StateIoError>,
             description: &'static str,
         }
 
@@ -158,13 +158,13 @@ mod test {
             Test {
                 input: json!({"key": {"inner_key": "inner_value"}}),
                 path: Some(json!("$.doesnt_exist")),
-                expected: Err(StateIOError::PathFailure),
+                expected: Err(StateIoError::PathFailure),
                 description: "key that doesn't exist fails",
             },
             Test {
                 input: json!({"key": {"inner_key": "inner_value"}}),
                 path: Some(json!("$.key.inner_key.doesnt_exit")),
-                expected: Err(StateIOError::PathFailure),
+                expected: Err(StateIoError::PathFailure),
                 description: "looking up non-object fails",
             },
         ];
@@ -181,7 +181,7 @@ mod test {
             input: Value,
             context: Value,
             path: Parameters,
-            expected: Result<Value, StateIOError>,
+            expected: Result<Value, StateIoError>,
             description: &'static str,
         }
 
