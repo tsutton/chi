@@ -10,7 +10,11 @@ pub enum StateIoError {
 /// - Value::Null: the input will be the empty object {}
 /// - Value::String(s): s will be used a JSON Path.
 // TODO should this be an alias for ease of use? or a newtpe for safety?
+// TODO probably we should rearrange as Option<String>, such that None is null and an actual path is Some(...)
+//      but we handle the not-provided upstream, by defaulting to Some("$")
 pub type InputPath = Option<Value>;
+
+pub mod reference_path;
 
 pub fn apply_input_path(input_path: &InputPath, input: &Value) -> Result<Value, StateIoError> {
     match input_path {
@@ -91,7 +95,7 @@ pub fn apply_parameters(
     }
 }
 
-pub fn apply_results_path(
+pub fn apply_result_path(
     input: &Value,
     output: &Value,
     path: &InputPath,
