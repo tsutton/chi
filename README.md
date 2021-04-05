@@ -8,7 +8,8 @@ Chi is an executor for the [States language](https://states-language.net/) with 
 
 * Clone this repo
 * Run `cargo build --release`
-* Copy the binary to somewhere on your path, e.g. `cp ./target/release/chi $HOME/.cargo/bin`
+* Copy the binary to somewhere on your `$PATH`, e.g. `cp ./target/release/chi $HOME/.cargo/bin`
+* For most things to work, you will also need to have `jq` installed and on your `$PATH`
 * Run an example! `chi -s examples/machine.json -t examples/specs.yml`
 
 `chi` has two mandatory arguments:
@@ -45,4 +46,5 @@ This repository contains a binary crate which is a thin wrapper around the libra
 ## FAQ
 
 **Why chi?**
+
 Chi (χ) is the Greek letter commonly used in mathematics for [indicator functions](https://en.wikipedia.org/wiki/Indicator_function), which are the building blocks of [step functions](https://en.wikipedia.org/wiki/Step_function).

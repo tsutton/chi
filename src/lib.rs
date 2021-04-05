@@ -1,6 +1,6 @@
 // #![warn(missing_debug_implementations, rust_2018_idioms)]
 // #![warn(missing_docs)]
-use io::apply_results_path;
+use io::apply_result_path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -189,7 +189,7 @@ impl Execution {
                                             })
                                         }) {
                                             Some(catcher) => {
-                                                let next_input = match apply_results_path(
+                                                let next_input = match apply_result_path(
                                                     input,
                                                     &json!({"error": error, "cause": cause}),
                                                     &catcher.result_path,
