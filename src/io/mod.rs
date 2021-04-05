@@ -1,3 +1,4 @@
+use reference_path::ReferencePath;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +107,13 @@ pub fn apply_result_path(
     match path {
         None => Ok(output.clone()),
         Some(Value::Null) => Ok(input.clone()),
-        // TODO support non-null results_path
+        Some(Value::String(s)) => {
+            let mut final_output = input.clone();
+            ReferencePath::compile(s)
+                .and_then(|path| path.insert(&mut final_output, output.clone()))
+                .and(Ok(final_output))
+                .map_err(|_| StateIoError::PathFailure)
+        }
         _ => Err(StateIoError::PathFailure),
     }
 }
@@ -245,5 +252,65 @@ mod test {
         }
     }
 
-    // TODO tests for apply_results_path
+    #[test]
+    fn results_path() {
+        struct Test {
+            input: Value,
+            path: InputPath,
+            result: Value,
+            expected: Result<Value, StateIoError>,
+            description: &'static str,
+        }
+
+        let tests = vec![
+            // Tests on paths that should work
+            Test {
+                input: json!({}),
+                path: None,
+                result: json!("hello"),
+                expected: Ok(json!("hello")),
+                description: "None replaces the input",
+            },
+            Test {
+                input: json!({}),
+                path: Some(Value::Null),
+                result: json!("hello"),
+                expected: Ok(json!({})),
+                description: "null ignores the result",
+            },
+            Test {
+                input: json!({}),
+                path: Some(json!("$")),
+                result: json!("hello"),
+                expected: Ok(json!("hello")),
+                description: "$ replaces the input",
+            },
+            Test {
+                input: json!({"master": {"detail": [1,2,3]}}),
+                path: Some(json!("$.master.detail")),
+                result: json!(6),
+                expected: Ok(json!({"master": {"detail": 6}})),
+                description: "Non-trivial path on existing place in object",
+            },
+            Test {
+                input: json!({"master": {"detail": [1,2,3]}}),
+                path: Some(json!("$.master.result.sum")),
+                result: json!(6),
+                expected: Ok(json!({"master": {"detail": [1,2,3], "result": {"sum": 6}}})),
+                description: "Non-trivial path on new place",
+            },
+            Test {
+                input: json!({"master": {"detail": [1,2,3]}}),
+                path: Some(json!("$.master.detail[0]")),
+                result: json!(6),
+                expected: Ok(json!({"master": {"detail": [6,2,3]}})),
+                description: "Non-trivial path on new place in array",
+            },
+        ];
+
+        for test in tests {
+            let result = apply_result_path(&test.input, &test.result, &test.path);
+            assert_eq!(result, test.expected, "{}", test.description);
+        }
+    }
 }

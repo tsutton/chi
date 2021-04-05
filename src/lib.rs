@@ -782,9 +782,61 @@ mod tests {
         assert_eq!(
             execution.run(),
             Ok(json!({
-                "error": "ErrorB".to_owned(),
+                "error": "ErrorB",
                 "cause": "4",
             }))
+        );
+    }
+
+    #[test]
+    fn catch_results_path() {
+        #[rustfmt::skip]
+        let machine = r#"{
+            "StartAt": "main",
+            "States": {
+              "main": {
+                "Type": "Task",
+                "Resource": "fails",
+		"End": true,
+                "Catch": [
+                  {
+                    "ErrorEquals": [ "States.ALL" ],
+                    "ResultPath": "$.error_info",
+                    "Next": "Z"
+                  }
+                ]
+              },
+              "Z": {
+                "Type": "Task",
+		"End": true,
+                "Resource": "error_info"
+              }
+            }
+        }"#;
+
+        let machine: StateMachine = serde_json::from_str(machine).unwrap();
+
+        let res = mock::function(move |_| {
+            Err(mock::Error {
+                error: "error".to_owned(),
+                cause: "cause".to_owned(),
+            })
+        });
+
+        let mut resources = HashMap::new();
+        resources.insert("fails".to_owned(), res);
+        resources.insert("error_info".to_owned(), mock::identity());
+
+        let mut execution = Execution::new(&machine, resources, &json!({}));
+        #[rustfmt::skip]
+        assert_eq!(
+            execution.run(),
+            Ok(json!({
+              "error_info": {
+                "error": "error",
+                "cause": "cause",
+              }
+	    }))
         );
     }
 
