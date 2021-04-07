@@ -148,17 +148,30 @@ impl Execution {
 
                         match resource.execute(&effective_input) {
                             Ok(output) => {
+                                let effective_output =
+                                    match apply_result_path(&input, &output, &task.result_path) {
+                                        Ok(o) => o,
+                                        Err(e) => {
+                                            self.fail(
+                                                "States.ResultsPathMatchFailure",
+                                                &format!("{:?}", e),
+                                            );
+                                            return true;
+                                        }
+                                    };
                                 self.events.push(ExecutionEvent::StateSucceeded {
                                     name: state_name.to_owned(),
-                                    output: output.clone(),
+                                    output: effective_output.clone(),
                                     // result: ...
                                 });
                                 match &task.transition {
                                     Transition::End(true) => {
                                         self.events.push(ExecutionEvent::Succeeded {
-                                            output: output.clone(),
+                                            output: effective_output.clone(),
                                         });
-                                        self.state = ExecutionState::Succeeded { output };
+                                        self.state = ExecutionState::Succeeded {
+                                            output: effective_output,
+                                        };
                                         true
                                     }
                                     Transition::End(_) => {
@@ -167,7 +180,7 @@ impl Execution {
                                     Transition::Next(next) => {
                                         self.state = ExecutionState::ExecuteState {
                                             state_name: next.clone(),
-                                            input: output,
+                                            input: effective_output,
                                             retried_errors: vec![],
                                         };
                                         false
@@ -392,6 +405,7 @@ pub struct Task {
     pub resource: String,
     pub input_path: io::InputPath,
     pub parameters: Option<Value>,
+    pub result_path: io::InputPath,
 
     #[serde(default)]
     pub retry: Vec<Retry>,
@@ -410,7 +424,7 @@ pub struct Retry {
     #[serde(default = "const_three")]
     max_attempts: u32,
     #[serde(default = "const_one")]
-    inteval_seconds: u32,
+    interval_seconds: u32,
     #[serde(default = "const_2_0")]
     backoff_rate: serde_json::Number,
 }
@@ -483,6 +497,7 @@ mod tests {
             parameters: None,
             retry: vec![],
             catch: vec![],
+            result_path: None,
         });
         let mut states = HashMap::new();
         states.insert("Hello World".to_owned(), t);
@@ -638,7 +653,7 @@ mod tests {
     }"#;
 
         #[derive(Debug, Deserialize, Serialize)]
-        struct IncrIO {
+        struct IncrIo {
             count: i64,
         }
 
@@ -648,7 +663,7 @@ mod tests {
         resources.insert(
             "incr".to_owned(),
             mock::function(|v| {
-                let mut inp: IncrIO =
+                let mut inp: IncrIo =
                     serde_json::from_value(v.clone()).map_err(|e| mock::Error {
                         error: "bad.input".to_owned(),
                         cause: format!("{:?}", e),
@@ -838,6 +853,71 @@ mod tests {
               }
 	    }))
         );
+    }
+
+    #[test]
+    fn task_results_path() {
+        fn make_machine(result_path: io::InputPath) -> StateMachine {
+            StateMachine {
+                comment: None,
+                version: None,
+                timeout_seconds: None,
+
+                start_at: "main".to_owned(),
+                states: vec![(
+                    "main".to_owned(),
+                    State::Task(Task {
+                        resource: "const".to_owned(),
+                        transition: Transition::End(true),
+                        result_path,
+
+                        catch: vec![],
+                        retry: vec![],
+                        comment: None,
+                        input_path: None,
+                        parameters: None,
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            }
+        }
+
+        struct Test {
+            description: &'static str,
+            result_path: Option<&'static str>,
+            expected: Result<Value, Value>,
+        }
+
+        let tests: Vec<Test> = vec![
+            Test {
+                description: "no result path",
+                result_path: None,
+                expected: Ok(json!("result")),
+            },
+            Test {
+                description: "result path is $",
+                result_path: Some("$"),
+                expected: Ok(json!("result")),
+            },
+            Test {
+                description: "result path is $.a.b",
+                result_path: Some("$.a.b"),
+                expected: Ok(json!({"a": {"b": "result"}})),
+            },
+        ];
+
+        for test in tests {
+            let res = mock::constant(json!("result"));
+            let mut resources = HashMap::new();
+            resources.insert("const".to_owned(), res);
+            let mut execution = Execution::new(
+                &make_machine(test.result_path.map(|s| Value::String(s.to_owned()))),
+                resources,
+                &json!({}),
+            );
+            assert_eq!(execution.run(), test.expected, "{}", test.description);
+        }
     }
 
     // TODO more tests:
