@@ -12,4 +12,4 @@ serde_yaml = "0.8.17"
 clap = "2.33.3"
 nom = "6.1.2"
 thiserror = "1.0.24"
-
+enum_dispatch = "0.3.5"

@@ -1,6 +1,7 @@
 // #![warn(missing_debug_implementations, rust_2018_idioms)]
 // #![warn(missing_docs)]
-use io::apply_result_path;
+use io::reference_path::ReferencePath;
+use io::{apply_result_path, StateIo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -9,6 +10,8 @@ pub mod mock;
 use mock::MockResource;
 
 pub mod io;
+
+// pub mod state_2;
 
 pub mod choice;
 pub use choice::*;
@@ -122,43 +125,31 @@ impl Execution {
                     input: input.clone(),
                 });
                 match state {
+                    State::Pass(_) => {
+                        todo!()
+                    }
                     State::Task(task) => {
                         let resource = self
                             .resources
                             .get_mut(&task.resource)
                             .unwrap_or_else(|| panic!("missing resource for {}", &task.resource));
-                        let effective_input = match io::apply_input_path(&task.input_path, input) {
+                        let effective_input = match task.effective_input(&input, &json!({})) {
                             Ok(i) => i,
-                            Err(_) => {
-                                self.fail("States.Runtime", "failed to apply input path");
+                            Err(e) => {
+                                self.fail(&e.error, &e.cause);
                                 return true;
                             }
                         };
-                        let effective_input = match io::apply_parameters(
-                            &task.parameters,
-                            &effective_input,
-                            &json!({}),
-                        ) {
-                            Ok(i) => i,
-                            Err(_) => {
-                                self.fail("States.Runtime", "Failed to apply parameters: {}");
-                                return true;
-                            }
-                        };
-
                         match resource.execute(&effective_input) {
                             Ok(output) => {
-                                let effective_output =
-                                    match apply_result_path(&input, &output, &task.result_path) {
-                                        Ok(o) => o,
-                                        Err(e) => {
-                                            self.fail(
-                                                "States.ResultsPathMatchFailure",
-                                                &format!("{:?}", e),
-                                            );
-                                            return true;
-                                        }
-                                    };
+                                let effective_output = match task.effective_output(&input, &output)
+                                {
+                                    Ok(o) => o,
+                                    Err(e) => {
+                                        self.fail(&e.error, &e.cause);
+                                        return true;
+                                    }
+                                };
                                 self.events.push(ExecutionEvent::StateSucceeded {
                                     name: state_name.to_owned(),
                                     output: effective_output.clone(),
@@ -208,11 +199,8 @@ impl Execution {
                                                     &catcher.result_path,
                                                 ) {
                                                     Ok(i) => i,
-                                                    Err(_) => {
-                                                        self.fail(
-                                                            "States.ResultsPathMatchFailure",
-                                                            "Failed to apply results_path",
-                                                        );
+                                                    Err(e) => {
+                                                        self.fail(&e.error, &e.cause);
                                                         return true;
                                                     }
                                                 };
@@ -352,7 +340,7 @@ fn should_retry(error: &str, retry_counts: &[u32], retries: &[Retry]) -> Option<
 ///
 /// It is intentionally verbose and redundant to allow for easier debugging, for example,
 /// It is redundant to give both the input and the parameters for StateEntered, because the
-/// parameters can be deduced by applying the state's InputPath and Parameters to the event's input.
+/// parameters can be deduced by applying the state's Path and Parameters to the event's input.
 /// Similarly, giving the output of a state then the input of the next state is redudant, but can make debugging
 /// a key part of the state easier.
 ///
@@ -403,9 +391,11 @@ pub enum Transition {
 pub struct Task {
     pub comment: Option<String>,
     pub resource: String,
-    pub input_path: io::InputPath,
+    #[serde(default = "io::default_input_path")]
+    pub input_path: io::Path,
     pub parameters: Option<Value>,
-    pub result_path: io::InputPath,
+    #[serde(default = "io::default_result_path")]
+    pub result_path: Option<ReferencePath>,
 
     #[serde(default)]
     pub retry: Vec<Retry>,
@@ -434,7 +424,8 @@ pub struct Retry {
 pub struct Catch {
     error_equals: Vec<String>,
     next: String,
-    result_path: io::InputPath,
+    #[serde(default = "io::default_result_path")]
+    result_path: Option<ReferencePath>,
 }
 
 fn const_three() -> u32 {
@@ -449,11 +440,35 @@ fn const_2_0() -> serde_json::Number {
     serde_json::Number::from_f64(2.0).unwrap()
 }
 
+impl StateIo for Task {
+    fn input_path(&self) -> io::Path {
+        self.input_path.clone()
+    }
+
+    fn parameters(&self) -> io::Template {
+        self.parameters.clone()
+    }
+
+    // TODO
+    // fn results_selector(&self) -> io::Template {
+    //     None
+    // }
+
+    fn result_path(&self) -> Option<ReferencePath> {
+        self.result_path.clone()
+    }
+
+    // TODO
+    // fn output_path(&self) -> io::Path {
+    //     Some("$".to_owned())
+    // }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Choice {
     pub comment: Option<String>,
-    pub input_path: io::InputPath,
+    pub input_path: io::Path,
     pub choices: Vec<ChoiceRule>,
     pub default: Option<String>,
 }
@@ -466,6 +481,20 @@ pub enum State {
     Choice(Choice),
     Succeed,
     Fail { error: String, cause: String },
+    Pass(Pass),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Pass {
+    pub comment: Option<String>,
+    pub resource: String,
+    pub input_path: io::Path,
+    pub parameters: Option<Value>,
+    pub result_path: io::Path,
+
+    #[serde(flatten)]
+    pub transition: Transition,
 }
 
 #[cfg(test)]
@@ -475,29 +504,29 @@ mod tests {
     const HELLO_WORLD_LAMBDA: &str = "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld";
 
     /*
-    This is the hello-world example from the States spec
-    {
-      "Comment": "A simple minimal example of the States language",
-      "StartAt": "Hello World",
-      "States": {
-        "Hello World": {
-          "Type": "Task",
-          "Resource": "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld",
-          "End": true
+        This is the hello-world example from the States spec
+        {
+          "Comment": "A simple minimal example of the States language",
+          "StartAt": "Hello World",
+          "States": {
+            "Hello World": {
+              "Type": "Task",
+              "Resource": "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld",
+    n          "End": true
+            }
+          }
         }
-      }
-    }
-     */
+         */
     fn hello_world_machine() -> StateMachine {
         let t = State::Task(Task {
             comment: None,
             transition: Transition::End(true),
             resource: HELLO_WORLD_LAMBDA.to_owned(),
-            input_path: None,
+            input_path: Some("$".to_owned()),
             parameters: None,
             retry: vec![],
             catch: vec![],
-            result_path: None,
+            result_path: Some(ReferencePath::default()),
         });
         let mut states = HashMap::new();
         states.insert("Hello World".to_owned(), t);
@@ -519,6 +548,7 @@ mod tests {
         let mut resources = HashMap::new();
         resources.insert(HELLO_WORLD_LAMBDA.to_owned(), mock_resource);
 
+        eprintln!("{:?}", machine.states["Hello World"]);
         let mut execution = Execution::new(&machine, resources, &Value::Null);
         let result = execution.run();
         assert_eq!(result, Ok(json!("Hello, World!")))
@@ -791,7 +821,12 @@ mod tests {
         let mut resources = HashMap::new();
         resources.insert("fails".to_owned(), res);
 
-        resources.insert("error_info".to_owned(), mock::identity());
+        // resources.insert("error_info".to_owned(), mock::identity());
+        let error_info = mock::function(move |input| {
+            eprintln!("error_info called with input={}", &input);
+            Ok(input.clone())
+        });
+        resources.insert("error_info".to_owned(), error_info);
 
         let mut execution = Execution::new(&machine, resources, &json!({}));
         assert_eq!(
@@ -857,7 +892,7 @@ mod tests {
 
     #[test]
     fn task_results_path() {
-        fn make_machine(result_path: io::InputPath) -> StateMachine {
+        fn make_machine(result_path: Option<ReferencePath>) -> StateMachine {
             StateMachine {
                 comment: None,
                 version: None,
@@ -893,7 +928,7 @@ mod tests {
             Test {
                 description: "no result path",
                 result_path: None,
-                expected: Ok(json!("result")),
+                expected: Ok(json!({})),
             },
             Test {
                 description: "result path is $",
@@ -912,7 +947,7 @@ mod tests {
             let mut resources = HashMap::new();
             resources.insert("const".to_owned(), res);
             let mut execution = Execution::new(
-                &make_machine(test.result_path.map(|s| Value::String(s.to_owned()))),
+                &make_machine(test.result_path.map(|s| ReferencePath::compile(s).unwrap())),
                 resources,
                 &json!({}),
             );

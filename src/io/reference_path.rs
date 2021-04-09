@@ -27,6 +27,7 @@ use nom::{
     IResult,
 };
 
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -39,6 +40,41 @@ use thiserror::Error;
 /// encountering an existing field that isn't of type object.
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct ReferencePath(Vec<Select>);
+
+impl<'de> Deserialize<'de> for ReferencePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: &str = <&str as Deserialize<'de>>::deserialize(deserializer)?;
+        let path = ReferencePath::compile(s).map_err(serde::de::Error::custom)?;
+        Ok(path)
+    }
+}
+
+// TODO this doesn't re-escape Select::Field's quotes and such
+impl Serialize for ReferencePath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut composed = String::from("$");
+        self.0
+            .iter()
+            .map(|s| match s {
+                Select::Index(i) => format!("[{}]", i),
+                Select::Field(s) => format!("['{}']", s),
+            })
+            .for_each(|s| composed.push_str(&s));
+        serializer.serialize_str(&composed)
+    }
+}
+
+impl Default for ReferencePath {
+    fn default() -> Self {
+        ReferencePath(vec![])
+    }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
 enum Select {
@@ -459,6 +495,37 @@ mod test {
                 .insert(&mut value, json!("hello"))
                 .is_err(),
             "out of bounds array lookup"
+        );
+    }
+
+    #[test]
+    fn reference_path_deserialize() {
+        assert_eq!(
+            serde_json::from_str::<ReferencePath>("\"$.a.b['c'][1]\"").unwrap(),
+            ReferencePath(vec![
+                Select::Field("a".to_owned()),
+                Select::Field("b".to_owned()),
+                Select::Field("c".to_owned()),
+                Select::Index(1),
+            ])
+        );
+        assert!(serde_json::from_str::<ReferencePath>("\"$.a.b[c][1]\"").is_err());
+        assert!(serde_json::from_str::<ReferencePath>("5").is_err());
+        assert!(serde_json::from_str::<ReferencePath>("null").is_err());
+        assert!(serde_json::from_str::<ReferencePath>("{}").is_err());
+    }
+
+    #[test]
+    fn reference_path_serialize() {
+        assert_eq!(
+            serde_json::to_string(&ReferencePath(vec![
+                Select::Field("a".to_owned()),
+                Select::Field("b".to_owned()),
+                Select::Field("c".to_owned()),
+                Select::Index(1),
+            ]))
+            .unwrap(),
+            "\"$['a']['b']['c'][1]\"".to_owned()
         );
     }
 }
