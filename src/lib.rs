@@ -11,8 +11,6 @@ use mock::MockResource;
 
 pub mod io;
 
-// pub mod state_2;
-
 pub mod choice;
 pub use choice::*;
 
@@ -124,6 +122,13 @@ impl Execution {
                     name: state_name.clone(),
                     input: input.clone(),
                 });
+                let effective_input = match state.effective_input(&input, &json!({})) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        self.fail(&e.error, &e.cause);
+                        return true;
+                    }
+                };
                 match state {
                     State::Pass(_) => {
                         todo!()
@@ -133,13 +138,6 @@ impl Execution {
                             .resources
                             .get_mut(&task.resource)
                             .unwrap_or_else(|| panic!("missing resource for {}", &task.resource));
-                        let effective_input = match task.effective_input(&input, &json!({})) {
-                            Ok(i) => i,
-                            Err(e) => {
-                                self.fail(&e.error, &e.cause);
-                                return true;
-                            }
-                        };
                         match resource.execute(&effective_input) {
                             Ok(output) => {
                                 let effective_output = match task.effective_output(&input, &output)
@@ -221,16 +219,16 @@ impl Execution {
                             }
                         }
                     }
-                    State::Succeed => {
+                    State::Succeed(_) => {
                         self.events.push(ExecutionEvent::Succeeded {
-                            output: input.clone(),
+                            output: effective_input.clone(),
                         });
                         self.state = ExecutionState::Succeeded {
-                            output: input.clone(),
+                            output: effective_input,
                         };
                         true
                     }
-                    State::Fail { error, cause } => {
+                    State::Fail(Fail { error, cause }) => {
                         self.events.push(ExecutionEvent::Failed {
                             error: error.clone(),
                             cause: cause.to_owned(),
@@ -242,16 +240,17 @@ impl Execution {
                         true
                     }
                     State::Choice(c) => {
+                        // TODO support effective_output
                         for choice in &c.choices {
-                            match choice.choice_expr.check(input) {
+                            match choice.choice_expr.check(&effective_input) {
                                 Ok(true) => {
                                     self.events.push(ExecutionEvent::StateSucceeded {
                                         name: state_name.clone(),
-                                        output: input.clone(),
+                                        output: effective_input.clone(),
                                     });
                                     self.state = ExecutionState::ExecuteState {
                                         state_name: choice.next.to_string(),
-                                        input: input.clone(),
+                                        input: effective_input.clone(),
                                         retried_errors: vec![],
                                     };
                                     return false;
@@ -274,10 +273,10 @@ impl Execution {
                             Some(s) => {
                                 self.events.push(ExecutionEvent::StateSucceeded {
                                     name: state_name.clone(),
-                                    output: input.clone(),
+                                    output: effective_input.clone(),
                                 });
                                 self.state = ExecutionState::ExecuteState {
-                                    input: input.clone(),
+                                    input: effective_input,
                                     state_name: s.to_owned(),
                                     retried_errors: vec![],
                                 };
@@ -468,9 +467,16 @@ impl StateIo for Task {
 #[serde(rename_all = "PascalCase")]
 pub struct Choice {
     pub comment: Option<String>,
+    #[serde(default = "io::default_input_path")]
     pub input_path: io::Path,
     pub choices: Vec<ChoiceRule>,
     pub default: Option<String>,
+}
+
+impl StateIo for Choice {
+    fn input_path(&self) -> io::Path {
+        self.input_path.clone()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,22 +485,105 @@ pub struct Choice {
 pub enum State {
     Task(Task),
     Choice(Choice),
-    Succeed,
-    Fail { error: String, cause: String },
+    Succeed(Succeed),
+    Fail(Fail),
     Pass(Pass),
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Succeed {}
+
+impl StateIo for Succeed {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Fail {
+    error: String,
+    cause: String,
+}
+
+impl StateIo for Fail {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct Pass {
     pub comment: Option<String>,
     pub resource: String,
+    #[serde(default = "io::default_input_path")]
     pub input_path: io::Path,
     pub parameters: Option<Value>,
-    pub result_path: io::Path,
+    #[serde(default = "io::default_result_path")]
+    pub result_path: Option<ReferencePath>,
 
     #[serde(flatten)]
     pub transition: Transition,
+}
+
+impl StateIo for Pass {
+    fn result_path(&self) -> Option<ReferencePath> {
+        self.result_path.clone()
+    }
+    fn input_path(&self) -> io::Path {
+        self.input_path.clone()
+    }
+    fn parameters(&self) -> io::Template {
+        self.parameters.clone()
+    }
+}
+
+// I found a crate with a macro for making this less annoying (enum_dispatch)
+// but it seems to work with internals that don't like the trait and enum being in separate modules.
+impl StateIo for State {
+    fn input_path(&self) -> io::Path {
+        match self {
+            State::Task(x) => x.input_path(),
+            State::Choice(x) => x.input_path(),
+            State::Succeed(x) => x.input_path(),
+            State::Fail(x) => x.input_path(),
+            State::Pass(x) => x.input_path(),
+        }
+    }
+
+    fn parameters(&self) -> io::Template {
+        match self {
+            State::Task(x) => x.parameters(),
+            State::Choice(x) => x.parameters(),
+            State::Succeed(x) => x.parameters(),
+            State::Fail(x) => x.parameters(),
+            State::Pass(x) => x.parameters(),
+        }
+    }
+
+    fn results_selector(&self) -> io::Template {
+        match self {
+            State::Task(x) => x.results_selector(),
+            State::Choice(x) => x.results_selector(),
+            State::Succeed(x) => x.results_selector(),
+            State::Fail(x) => x.results_selector(),
+            State::Pass(x) => x.results_selector(),
+        }
+    }
+
+    fn result_path(&self) -> Option<ReferencePath> {
+        match self {
+            State::Task(x) => x.result_path(),
+            State::Choice(x) => x.result_path(),
+            State::Succeed(x) => x.result_path(),
+            State::Fail(x) => x.result_path(),
+            State::Pass(x) => x.result_path(),
+        }
+    }
+
+    fn output_path(&self) -> io::Path {
+        match self {
+            State::Task(x) => x.output_path(),
+            State::Choice(x) => x.output_path(),
+            State::Succeed(x) => x.output_path(),
+            State::Fail(x) => x.output_path(),
+            State::Pass(x) => x.output_path(),
+        }
+    }
 }
 
 #[cfg(test)]
