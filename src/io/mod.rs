@@ -2,11 +2,6 @@ use reference_path::ReferencePath;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateIoError {
-    PathFailure,
-}
-
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct Error {
     pub cause: String,
