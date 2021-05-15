@@ -4,7 +4,9 @@ use io::reference_path::ReferencePath;
 use io::{apply_result_path, StateIo};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 pub mod mock;
 use mock::MockResource;
@@ -33,7 +35,9 @@ pub struct StateMachine {
 pub struct Execution {
     machine: StateMachine,
     events: Vec<ExecutionEvent>,
-    resources: HashMap<String, Box<dyn MockResource>>,
+    // We store resources internally as an Rc<RefCell<_>> so it can be shared with
+    // sub-executions (e.g. Parallel and Map state Executions)
+    resources: Rc<RefCell<HashMap<String, Box<dyn MockResource>>>>,
     state: ExecutionState,
 }
 
@@ -57,8 +61,9 @@ pub enum ExecutionState {
     },
     AdvanceNestedState {
         state_name: String,
+        input: Value,
         executions: Vec<Execution>,
-        retried_errors: Vec<String>,
+        retried_errors: Vec<u32>,
     },
 }
 
@@ -66,6 +71,19 @@ impl Execution {
     pub fn new(
         machine: &StateMachine,
         resources: HashMap<String, Box<dyn MockResource>>,
+        input: &Value,
+    ) -> Execution {
+        let resources = Rc::new(RefCell::new(resources));
+        Self::new_with_shared_resources(machine, resources, input)
+    }
+
+    // This constructor is not public because generally we don't want to allow users to maintain shared
+    // ownership of resources once it's passed into an execution, because (for example), otherwise
+    // we can't ensure our borrow_mut() on the RefCell won't panic.
+    // However, it is useful internally, so that we can construct the sub-executions for Parallel and Map.
+    fn new_with_shared_resources(
+        machine: &StateMachine,
+        resources: Rc<RefCell<HashMap<String, Box<dyn MockResource>>>>,
         input: &Value,
     ) -> Execution {
         Execution {
@@ -134,11 +152,14 @@ impl Execution {
                         todo!()
                     }
                     State::Task(task) => {
-                        let resource = self
-                            .resources
+                        let execution_result = self
+                            .resources // Rc<RefCell<HashMap>>
+                            .as_ref() // &RefCell<HashMap>
+                            .borrow_mut() // &mut HashMap
                             .get_mut(&task.resource)
-                            .unwrap_or_else(|| panic!("missing resource for {}", &task.resource));
-                        match resource.execute(&effective_input) {
+                            .unwrap_or_else(|| panic!("missing resource for {}", &task.resource))
+                            .execute(&effective_input);
+                        match execution_result {
                             Ok(output) => {
                                 let effective_output = match task.effective_output(&input, &output)
                                 {
@@ -295,10 +316,148 @@ impl Execution {
                             }
                         }
                     }
+                    State::Parallel(p) => {
+                        let state_name = state_name.to_owned();
+                        let executions: Vec<_> = p
+                            .branches
+                            .iter()
+                            .map(|branch| {
+                                Execution::new_with_shared_resources(
+                                    &branch,
+                                    self.resources.clone(),
+                                    &effective_input,
+                                )
+                            })
+                            .collect();
+                        self.state = ExecutionState::AdvanceNestedState {
+                            state_name,
+                            executions,
+                            input: effective_input,
+                            retried_errors: vec![],
+                        };
+                        false
+                    }
                 }
             }
-            ExecutionState::AdvanceNestedState { .. } => {
-                todo!("nested execution state not implemented")
+            ExecutionState::AdvanceNestedState {
+                executions,
+                retried_errors,
+                state_name,
+                input,
+            } => {
+                // (setq company-prescient-sort-length-enable nil)
+                // first the first non-terminal exectution
+                let execution = executions
+                    .iter_mut()
+                    .find(|execution| match execution.state {
+                        ExecutionState::Failed { .. } => panic!("failed state in wrong place"),
+                        ExecutionState::Succeeded { .. } => false,
+                        _ => true,
+                    });
+                let state = self
+                    .machine
+                    .states
+                    .get(state_name)
+                    .unwrap_or_else(|| panic!("missing state for {}", state_name));
+                match (execution, state) {
+                    (None, State::Parallel(p)) => {
+                        let base_output = Value::Array(
+                            executions
+                                .iter()
+                                .map(|execution| {
+                                    if let ExecutionState::Succeeded { output } = &execution.state {
+                                        output.clone()
+                                    } else {
+                                        unreachable!("we checked above and all are in succeeded")
+                                    }
+                                })
+                                .collect(),
+                        );
+                        let effective_output = match p.effective_output(&input, &base_output) {
+                            Ok(o) => o,
+                            Err(e) => {
+                                self.fail(&e.error, &e.cause);
+                                return true;
+                            }
+                        };
+                        // TODO reduce duplication of transition code
+                        match &p.transition {
+                            Transition::End(true) => {
+                                self.state = ExecutionState::Succeeded {
+                                    output: effective_output,
+                                };
+                                true
+                            }
+                            Transition::End(_) => {
+                                panic!("can't provide End=false")
+                            }
+                            Transition::Next(next) => {
+                                self.state = ExecutionState::ExecuteState {
+                                    state_name: next.clone(),
+                                    input: effective_output,
+                                    retried_errors: vec![],
+                                };
+                                false
+                            }
+                        }
+                    }
+                    (None, _) => {
+                        // TODO change this line when we add map
+                        unreachable!("can't have other state types")
+                    }
+                    // TODO reduce duplication of retry code with Task
+                    // and prep for sharing code btwn p and map
+                    (Some(execution), State::Parallel(p)) => {
+                        execution.step();
+                        if let ExecutionState::Failed { error, cause } = &execution.state {
+                            match should_retry(&error, &retried_errors, &p.retry) {
+                                Some(i) => {
+                                    retried_errors[i] += 1;
+                                    false
+                                }
+                                None => {
+                                    match p.catch.iter().find(|catcher| {
+                                        catcher.error_equals.iter().any(|err_name| {
+                                            err_name == "States.ALL" || err_name == error
+                                        })
+                                    }) {
+                                        Some(catcher) => {
+                                            let next_input = match apply_result_path(
+                                                input,
+                                                &json!({"error": error, "cause": cause}),
+                                                &catcher.result_path,
+                                            ) {
+                                                Ok(i) => i,
+                                                Err(e) => {
+                                                    self.fail(&e.error, &e.cause);
+                                                    return true;
+                                                }
+                                            };
+                                            self.state = ExecutionState::ExecuteState {
+                                                state_name: catcher.next.clone(),
+                                                input: next_input,
+                                                retried_errors: vec![],
+                                            };
+                                            false
+                                        }
+                                        None => {
+                                            let error = error.clone();
+                                            let cause = cause.clone();
+                                            self.fail(&error, &cause);
+                                            true
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    (Some(_), _) => {
+                        // TODO change this line when we add map
+                        unreachable!("can't have other state types")
+                    }
+                }
             }
         }
     }
@@ -395,6 +554,9 @@ pub struct Task {
     pub parameters: Option<Value>,
     #[serde(default = "io::default_result_path")]
     pub result_path: Option<ReferencePath>,
+    pub result_selector: Option<Value>,
+    #[serde(default = "io::default_output_path")]
+    pub output_path: io::Path,
 
     #[serde(default)]
     pub retry: Vec<Retry>,
@@ -448,19 +610,17 @@ impl StateIo for Task {
         self.parameters.clone()
     }
 
-    // TODO
-    // fn results_selector(&self) -> io::Template {
-    //     None
-    // }
+    fn result_selector(&self) -> io::Template {
+        self.result_selector.clone()
+    }
 
     fn result_path(&self) -> Option<ReferencePath> {
         self.result_path.clone()
     }
 
-    // TODO
-    // fn output_path(&self) -> io::Path {
-    //     Some("$".to_owned())
-    // }
+    fn output_path(&self) -> io::Path {
+        Some("$".to_owned())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +640,53 @@ impl StateIo for Choice {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Parallel {
+    pub comment: Option<String>,
+    #[serde(default = "io::default_input_path")]
+    pub input_path: io::Path,
+    pub parameters: Option<Value>,
+    #[serde(default = "io::default_result_path")]
+    pub result_path: Option<ReferencePath>,
+    pub result_selector: Option<Value>,
+    #[serde(default = "io::default_output_path")]
+    pub output_path: io::Path,
+
+    #[serde(default)]
+    pub retry: Vec<Retry>,
+
+    #[serde(default)]
+    pub catch: Vec<Catch>,
+
+    #[serde(flatten)]
+    pub transition: Transition,
+
+    pub branches: Vec<StateMachine>,
+}
+
+impl StateIo for Parallel {
+    fn input_path(&self) -> io::Path {
+        self.input_path.clone()
+    }
+
+    fn parameters(&self) -> io::Template {
+        self.parameters.clone()
+    }
+
+    fn result_selector(&self) -> io::Template {
+        self.result_selector.clone()
+    }
+
+    fn result_path(&self) -> Option<ReferencePath> {
+        self.result_path.clone()
+    }
+
+    fn output_path(&self) -> io::Path {
+        self.output_path.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "Type")]
 #[serde(rename_all = "PascalCase")]
 pub enum State {
@@ -488,6 +695,7 @@ pub enum State {
     Succeed(Succeed),
     Fail(Fail),
     Pass(Pass),
+    Parallel(Parallel),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +750,7 @@ impl StateIo for State {
             State::Succeed(x) => x.input_path(),
             State::Fail(x) => x.input_path(),
             State::Pass(x) => x.input_path(),
+            State::Parallel(x) => x.input_path(),
         }
     }
 
@@ -552,16 +761,18 @@ impl StateIo for State {
             State::Succeed(x) => x.parameters(),
             State::Fail(x) => x.parameters(),
             State::Pass(x) => x.parameters(),
+            State::Parallel(x) => x.parameters(),
         }
     }
 
-    fn results_selector(&self) -> io::Template {
+    fn result_selector(&self) -> io::Template {
         match self {
-            State::Task(x) => x.results_selector(),
-            State::Choice(x) => x.results_selector(),
-            State::Succeed(x) => x.results_selector(),
-            State::Fail(x) => x.results_selector(),
-            State::Pass(x) => x.results_selector(),
+            State::Task(x) => x.result_selector(),
+            State::Choice(x) => x.result_selector(),
+            State::Succeed(x) => x.result_selector(),
+            State::Fail(x) => x.result_selector(),
+            State::Pass(x) => x.result_selector(),
+            State::Parallel(x) => x.result_selector(),
         }
     }
 
@@ -572,6 +783,7 @@ impl StateIo for State {
             State::Succeed(x) => x.result_path(),
             State::Fail(x) => x.result_path(),
             State::Pass(x) => x.result_path(),
+            State::Parallel(x) => x.result_path(),
         }
     }
 
@@ -582,12 +794,15 @@ impl StateIo for State {
             State::Succeed(x) => x.output_path(),
             State::Fail(x) => x.output_path(),
             State::Pass(x) => x.output_path(),
+            State::Parallel(x) => x.output_path(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::mock::{constant, function};
+
     use super::*;
 
     const HELLO_WORLD_LAMBDA: &str = "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld";
@@ -616,6 +831,8 @@ mod tests {
             retry: vec![],
             catch: vec![],
             result_path: Some(ReferencePath::default()),
+            result_selector: None,
+            output_path: io::default_output_path(),
         });
         let mut states = HashMap::new();
         states.insert("Hello World".to_owned(), t);
@@ -928,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_results_path() {
+    fn catch_result_path() {
         #[rustfmt::skip]
         let machine = r#"{
             "StartAt": "main",
@@ -980,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn task_results_path() {
+    fn task_result_path() {
         fn make_machine(result_path: Option<ReferencePath>) -> StateMachine {
             StateMachine {
                 comment: None,
@@ -994,12 +1211,13 @@ mod tests {
                         resource: "const".to_owned(),
                         transition: Transition::End(true),
                         result_path,
-
                         catch: vec![],
                         retry: vec![],
                         comment: None,
                         input_path: None,
                         parameters: None,
+                        result_selector: None,
+                        output_path: io::default_output_path(),
                     }),
                 )]
                 .into_iter()
@@ -1044,7 +1262,107 @@ mod tests {
         }
     }
 
+    /// Basic test to demonstrate the parallel state with no frills.
+    #[test]
+    fn parallel_test_basic() {
+        #[rustfmt::skip]
+	let machine: StateMachine = serde_json::from_str(r#"{
+  "StartAt": "start",
+  "States": {
+    "start": {
+      "Type": "Parallel",
+      "Branches": [
+        {"StartAt": "add1", "States": {"add1": {"Type":"Task", "Resource": "add1", "End": true}}},
+        {"StartAt": "add2", "States": {"add2": {"Type":"Task", "Resource": "add2", "End": true}}}
+      ],
+      "End": true
+    }
+  }
+}"#).unwrap();
+        let mut resources = HashMap::new();
+        resources.insert(
+            "add1".to_owned(),
+            function(|v| Ok(json!(v.as_i64().unwrap() + 1))),
+        );
+        resources.insert(
+            "add2".to_owned(),
+            function(|v| Ok(json!(v.as_i64().unwrap() + 2))),
+        );
+        let mut execution = Execution::new(&machine, resources, &json!(2));
+        assert_eq!(execution.run(), Ok(json!([3, 4])))
+    }
+
+    /// Slightly more complex test which tests that if a branch of parallel fails, the whole thing fails,
+    /// but that catchers inside of the parallel still catch.
+    #[test]
+    fn parallel_test_errors() {
+        #[rustfmt::skip]
+	let machine: StateMachine = serde_json::from_str(r#"{
+  "StartAt": "start",
+  "States": {
+    "start": {
+      "Type": "Parallel",
+      "Branches": [
+        {"StartAt": "add1", "States": {"add1": {"Type":"Task", "Resource": "add1", "End": true}}},
+        {"StartAt": "add2", "States": {
+          "add2": {
+            "Type":"Task",
+            "Resource": "add2",
+            "End": true,
+            "Catch": [{"ErrorEquals":["catchable"], "Next": "catcher"}]
+          },
+          "catcher": {
+            "Type":"Task",
+            "Resource": "catcher",
+            "End": true
+          }
+        }}
+      ],
+      "End": true
+    }
+  }
+}"#).unwrap();
+        let mut resources = HashMap::new();
+        resources.insert(
+            "add1".to_owned(),
+            function(|v| Ok(json!(v.as_i64().unwrap() + 1))),
+        );
+        resources.insert(
+            "add2".to_owned(),
+            function(|_| {
+                Err(mock::Error {
+                    cause: "cause".to_owned(),
+                    error: "error".to_owned(),
+                })
+            }),
+        );
+        let resources = Rc::new(RefCell::new(resources));
+        let mut execution =
+            Execution::new_with_shared_resources(&machine, resources.clone(), &json!(2));
+        assert_eq!(
+            execution.run(),
+            Err(json!({
+                                "cause": "cause",
+                                "error": "error"
+            }))
+        );
+        resources.borrow_mut().insert(
+            "add2".to_owned(),
+            function(|_| {
+                Err(mock::Error {
+                    cause: "cause".to_owned(),
+                    error: "catchable".to_owned(),
+                })
+            }),
+        );
+        resources
+            .borrow_mut()
+            .insert("catcher".to_owned(), constant(json!(5)));
+        let mut execution =
+            Execution::new_with_shared_resources(&machine, resources.clone(), &json!(2));
+        assert_eq!(execution.run(), Ok(json!([3, 5])),);
+    }
+
     // TODO more tests:
     // - Succeed and Fail states
-    // - Refactor tests into Table, with common resources
 }
