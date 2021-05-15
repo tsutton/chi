@@ -140,7 +140,7 @@ pub fn apply_result_path(
 }
 
 // TODO implement and combine with apply_parameters
-fn apply_results_selector(output: &Value, selector: &Template) -> Result<Value, Error> {
+fn apply_result_selector(output: &Value, selector: &Template) -> Result<Value, Error> {
     match selector {
         None => Ok(output.to_owned()),
         Some(_) => todo!(),
@@ -176,7 +176,7 @@ pub trait StateIo {
     }
 
     // Special value None means use the effective output as-is
-    fn results_selector(&self) -> Template {
+    fn result_selector(&self) -> Template {
         None
     }
 
@@ -197,7 +197,7 @@ pub trait StateIo {
     }
 
     fn effective_output(&self, input: &Value, output: &Value) -> Result<Value, Error> {
-        apply_results_selector(&output, &self.results_selector())
+        apply_result_selector(&output, &self.result_selector())
             .and_then(|effective_result| {
                 apply_result_path(&input, &effective_result, &self.result_path())
             })
@@ -340,7 +340,7 @@ mod test {
     }
 
     #[test]
-    fn results_path() {
+    fn result_path() {
         struct Test {
             input: Value,
             path: Option<ReferencePath>,
