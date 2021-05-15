@@ -21,8 +21,7 @@ Both files are parsed as YAML (and thus can be JSON, since JSON is valid YAML).
 ## States Language support
 
 The following are missing entirely:
-* Map and Parallel states
-* `ResultsSelector`
+* Map state
 * `Pass` and `Wait` states
 * `OutputPath`
 * Intrinsic functions
