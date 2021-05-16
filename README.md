@@ -2,7 +2,7 @@
 
 *Chi is not ready for use yet.*
 
-Chi is an executor for the [States language](https://states-language.net/) with a goal of enabling testing and debugging of state machines. Instead of executing Lambda functions or using any of the other AWS service integrations built into [AWS Step Functions](https://docs.aws.amazon.com/step-functions/index.html), resources are provided by a DSL for expression simple JSON manipulation; thus State Machines can be tested against a variety of scenarios without needing to setup Lambdas.
+Chi is an executor for the [States language](https://states-language.net/) with a goal of enabling testing and debugging of state machines. Instead of executing Lambda functions or using any of the other AWS service integrations built into [AWS Step Functions](https://docs.aws.amazon.com/step-functions/index.html), resources are provided by a DSL for expressing simple JSON manipulation; thus State Machines can be tested against a variety of scenarios without needing to setup Lambdas.
 
 ## Quick Start
 

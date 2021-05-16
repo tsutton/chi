@@ -46,8 +46,6 @@ pub fn apply_path(input_path: &Path, input: &Value) -> Result<Value, Error> {
 ///   It is not possible to use a JSON Value to forward the input as-is, e.g. json!("$") will result in a final value of a string "$"
 pub type Template = Option<Value>;
 
-// TODO best way to share code with ResultsSelector, which is also a template?
-// maybe number of dollar signs => vec of template inputs
 pub fn apply_parameters(
     parameters: &Template,
     input: &Value,
@@ -139,12 +137,9 @@ pub fn apply_result_path(
     }
 }
 
-// TODO implement and combine with apply_parameters
+// TODO(compliance) Does AWS allow context in ResultSelector?
 fn apply_result_selector(output: &Value, selector: &Template) -> Result<Value, Error> {
-    match selector {
-        None => Ok(output.to_owned()),
-        Some(_) => todo!(),
-    }
+    apply_parameters(selector, output, &json!({}))
 }
 
 /// For types whose default when deserializing isn't their Default::default()
