@@ -337,6 +337,47 @@ impl Execution {
                         };
                         false
                     }
+                    State::Map(m) => {
+                        let state_name = state_name.to_owned();
+                        let effective_input = match m.items_path.select(&effective_input) {
+                            Some(v) => v.clone(),
+                            None => {
+                                self.fail(
+                                    "States.ItemsPathError",
+                                    "map state item path did not select an element",
+                                );
+                                return true;
+                            }
+                        };
+                        let input_array = match effective_input.as_array() {
+                            Some(a) => a,
+                            None => {
+                                self.fail(
+                                    "States.MapInputTypeError",
+                                    "map state was given non-array input",
+                                );
+                                return true;
+                            }
+                        };
+
+                        let executions: Vec<_> = input_array
+                            .iter()
+                            .map(|val| {
+                                Execution::new_with_shared_resources(
+                                    &m.iterator.clone(),
+                                    self.resources.clone(),
+                                    val,
+                                )
+                            })
+                            .collect();
+                        self.state = ExecutionState::AdvanceNestedState {
+                            state_name,
+                            executions,
+                            input: effective_input,
+                            retried_errors: vec![],
+                        };
+                        false
+                    }
                 }
             }
             ExecutionState::AdvanceNestedState {
@@ -345,12 +386,13 @@ impl Execution {
                 state_name,
                 input,
             } => {
-                // (setq company-prescient-sort-length-enable nil)
                 // first the first non-terminal exectution
                 let execution = executions
                     .iter_mut()
                     .find(|execution| match execution.state {
-                        ExecutionState::Failed { .. } => panic!("failed state in wrong place"),
+                        ExecutionState::Failed { .. } => {
+                            unreachable!("found failed state among complex state's executions")
+                        }
                         ExecutionState::Succeeded { .. } => false,
                         _ => true,
                     });
@@ -360,7 +402,12 @@ impl Execution {
                     .get(state_name)
                     .unwrap_or_else(|| panic!("missing state for {}", state_name));
                 match (execution, state) {
-                    (None, State::Parallel(p)) => {
+                    (None, _) => {
+                        let transition: Transition = match state {
+                            State::Parallel(p) => p.transition.clone(),
+                            State::Map(m) => m.transition.clone(),
+                            _ => unreachable!("only map and parallel states can get here"),
+                        };
                         let base_output = Value::Array(
                             executions
                                 .iter()
@@ -373,15 +420,15 @@ impl Execution {
                                 })
                                 .collect(),
                         );
-                        let effective_output = match p.effective_output(&input, &base_output) {
+                        let effective_output = match state.effective_output(&input, &base_output) {
                             Ok(o) => o,
                             Err(e) => {
                                 self.fail(&e.error, &e.cause);
                                 return true;
                             }
                         };
-                        // TODO reduce duplication of transition code
-                        match &p.transition {
+
+                        match transition {
                             Transition::End(true) => {
                                 self.state = ExecutionState::Succeeded {
                                     output: effective_output,
@@ -393,7 +440,7 @@ impl Execution {
                             }
                             Transition::Next(next) => {
                                 self.state = ExecutionState::ExecuteState {
-                                    state_name: next.clone(),
+                                    state_name: next,
                                     input: effective_output,
                                     retried_errors: vec![],
                                 };
@@ -401,22 +448,23 @@ impl Execution {
                             }
                         }
                     }
-                    (None, _) => {
-                        // TODO change this line when we add map
-                        unreachable!("can't have other state types")
-                    }
-                    // TODO reduce duplication of retry code with Task
-                    // and prep for sharing code btwn p and map
-                    (Some(execution), State::Parallel(p)) => {
+                    (Some(execution), state) => {
                         execution.step();
+                        let (retries, catch) = match state {
+                            State::Parallel(s) => (&s.retry, &s.catch),
+                            State::Map(s) => (&s.retry, &s.catch),
+                            _ => unreachable!(
+                                "only parallel and map state can be in AdvancedNestedState"
+                            ),
+                        };
                         if let ExecutionState::Failed { error, cause } = &execution.state {
-                            match should_retry(&error, &retried_errors, &p.retry) {
+                            match should_retry(&error, &retried_errors, retries) {
                                 Some(i) => {
                                     retried_errors[i] += 1;
                                     false
                                 }
                                 None => {
-                                    match p.catch.iter().find(|catcher| {
+                                    match catch.iter().find(|catcher| {
                                         catcher.error_equals.iter().any(|err_name| {
                                             err_name == "States.ALL" || err_name == error
                                         })
@@ -452,10 +500,6 @@ impl Execution {
                         } else {
                             false
                         }
-                    }
-                    (Some(_), _) => {
-                        // TODO change this line when we add map
-                        unreachable!("can't have other state types")
                     }
                 }
             }
@@ -687,6 +731,56 @@ impl StateIo for Parallel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct Map {
+    pub comment: Option<String>,
+    #[serde(default = "io::default_input_path")]
+    pub input_path: io::Path,
+    pub parameters: Option<Value>,
+    #[serde(default = "io::default_result_path")]
+    pub result_path: Option<ReferencePath>,
+    pub result_selector: Option<Value>,
+    #[serde(default = "io::default_output_path")]
+    pub output_path: io::Path,
+
+    #[serde(default)]
+    pub items_path: ReferencePath,
+
+    #[serde(default)]
+    pub retry: Vec<Retry>,
+
+    #[serde(default)]
+    pub catch: Vec<Catch>,
+
+    #[serde(flatten)]
+    pub transition: Transition,
+
+    pub iterator: StateMachine,
+}
+
+impl StateIo for Map {
+    fn input_path(&self) -> io::Path {
+        self.input_path.clone()
+    }
+
+    fn parameters(&self) -> io::Template {
+        self.parameters.clone()
+    }
+
+    fn result_selector(&self) -> io::Template {
+        self.result_selector.clone()
+    }
+
+    fn result_path(&self) -> Option<ReferencePath> {
+        self.result_path.clone()
+    }
+
+    fn output_path(&self) -> io::Path {
+        self.output_path.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "Type")]
 #[serde(rename_all = "PascalCase")]
 pub enum State {
@@ -696,6 +790,7 @@ pub enum State {
     Fail(Fail),
     Pass(Pass),
     Parallel(Parallel),
+    Map(Map),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -751,6 +846,7 @@ impl StateIo for State {
             State::Fail(x) => x.input_path(),
             State::Pass(x) => x.input_path(),
             State::Parallel(x) => x.input_path(),
+            State::Map(x) => x.input_path(),
         }
     }
 
@@ -762,6 +858,7 @@ impl StateIo for State {
             State::Fail(x) => x.parameters(),
             State::Pass(x) => x.parameters(),
             State::Parallel(x) => x.parameters(),
+            State::Map(x) => x.parameters(),
         }
     }
 
@@ -773,6 +870,7 @@ impl StateIo for State {
             State::Fail(x) => x.result_selector(),
             State::Pass(x) => x.result_selector(),
             State::Parallel(x) => x.result_selector(),
+            State::Map(x) => x.result_selector(),
         }
     }
 
@@ -784,6 +882,7 @@ impl StateIo for State {
             State::Fail(x) => x.result_path(),
             State::Pass(x) => x.result_path(),
             State::Parallel(x) => x.result_path(),
+            State::Map(x) => x.result_path(),
         }
     }
 
@@ -795,32 +894,33 @@ impl StateIo for State {
             State::Fail(x) => x.output_path(),
             State::Pass(x) => x.output_path(),
             State::Parallel(x) => x.output_path(),
+            State::Map(x) => x.output_path(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::mock::{constant, function};
+    use crate::mock::{constant, function, identity};
 
     use super::*;
 
     const HELLO_WORLD_LAMBDA: &str = "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld";
 
     /*
-        This is the hello-world example from the States spec
-        {
-          "Comment": "A simple minimal example of the States language",
-          "StartAt": "Hello World",
-          "States": {
-            "Hello World": {
-              "Type": "Task",
-              "Resource": "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld",
-    n          "End": true
-            }
-          }
+    This is the hello-world example from the States spec
+    {
+      "Comment": "A simple minimal example of the States language",
+      "StartAt": "Hello World",
+      "States": {
+        "Hello World": {
+          "Type": "Task",
+          "Resource": "arn:aws:lambda:us-east-1:123456789012:function:HelloWorld",
+          "End": true
         }
-         */
+      }
+    }
+     */
     fn hello_world_machine() -> StateMachine {
         let t = State::Task(Task {
             comment: None,
@@ -1342,8 +1442,8 @@ mod tests {
         assert_eq!(
             execution.run(),
             Err(json!({
-                                "cause": "cause",
-                                "error": "error"
+                "cause": "cause",
+                "error": "error"
             }))
         );
         resources.borrow_mut().insert(
@@ -1361,6 +1461,148 @@ mod tests {
         let mut execution =
             Execution::new_with_shared_resources(&machine, resources.clone(), &json!(2));
         assert_eq!(execution.run(), Ok(json!([3, 5])),);
+    }
+
+    // Similar to the examples in AWS documentation
+    #[test]
+    fn map_test_basic() {
+        let machine: StateMachine = serde_json::from_str(
+            r#"{
+"StartAt": "start",
+"States": {
+  "start": {
+    "Type": "Map",
+    "InputPath": "$.detail",
+    "ItemsPath": "$.shipped",
+    "MaxConcurrency": 0,
+    "Iterator": {
+      "StartAt": "Validate",
+      "States": {
+        "Validate": {
+          "Type": "Task",
+	  "Resource": "mapper",
+          "End": true
+        }
+      }
+    },
+    "End": true
+  }
+}
+}"#,
+        )
+        .unwrap();
+        let mut resources = HashMap::new();
+        resources.insert(
+            "mapper".to_owned(),
+            function(|v| Ok(json!(v["a"].as_i64().unwrap() * v["b"].as_i64().unwrap()))),
+        );
+
+        #[rustfmt::skip]
+	let input = json!({
+	    "detail": {
+		"shipped": [
+		    {"a": 1, "b": 2},
+		    {"a": 3, "b": 4},
+		    {"a": 5, "b": 6},
+		]
+	    }
+	});
+        let mut execution = Execution::new(&machine, resources, &input);
+        assert_eq!(execution.run(), Ok(json!([2, 12, 30])))
+    }
+
+    #[test]
+    fn map_test_complex() {
+        let machine: StateMachine = serde_json::from_str(
+            r#"{
+"StartAt": "start",
+"States": {
+  "start": {
+    "Type": "Map",
+    "InputPath": "$.detail",
+    "ItemsPath": "$.shipped",
+    "MaxConcurrency": 0,
+    "Iterator": {
+      "StartAt": "Validate",
+      "States": {
+        "Validate": {
+          "Type": "Task",
+	  "Resource": "mapper",
+          "Catch": [{
+            "ErrorEquals": ["TooBig"],
+            "Next": "CatchState"
+          }],
+          "End": true
+        },
+        "CatchState": {
+          "Type": "Task",
+	  "Resource": "succeed_with_error",
+          "End": true
+        }
+      }
+    },
+    "End": true
+  }
+}
+}"#,
+        )
+        .unwrap();
+        let mut resources = HashMap::new();
+        resources.insert(
+            "mapper".to_owned(),
+            function(|v| {
+                let ret = v["a"].as_i64().unwrap() * v["b"].as_i64().unwrap();
+                if ret <= 10 {
+                    Ok(json!(ret))
+                } else if ret <= 20 {
+                    Err(mock::Error {
+                        error: "TooBig".to_owned(),
+                        cause: "too big!".to_owned(),
+                    })
+                } else {
+                    Err(mock::Error {
+                        error: "WayTooBig".to_owned(),
+                        cause: "gigantic!".to_owned(),
+                    })
+                }
+            }),
+        );
+        resources.insert("succeed_with_error".to_owned(), identity());
+
+        #[rustfmt::skip]
+	let input = json!({
+	    "detail": {
+		"shipped": [
+		    {"a": 1, "b": 2},
+		    {"a": 3, "b": 3},
+		    {"a": 3, "b": 5},
+		]
+	    }
+	});
+        let resources = Rc::new(RefCell::new(resources));
+
+        let mut execution =
+            Execution::new_with_shared_resources(&machine, resources.clone(), &input);
+        assert_eq!(
+            execution.run(),
+            Ok(json!([2, 9, {"error":"TooBig", "cause":"too big!"}]))
+        );
+
+        #[rustfmt::skip]
+	let input = json!({
+	    "detail": {
+		"shipped": [
+		    {"a": 1, "b": 2},
+		    {"a": 3, "b": 3},
+		    {"a": 5, "b": 6},
+		]
+	    }
+	});
+        let mut execution = Execution::new_with_shared_resources(&machine, resources, &input);
+        assert_eq!(
+            execution.run(),
+            Err(json!({"error":"WayTooBig", "cause":"gigantic!"}))
+        )
     }
 
     // TODO more tests:
