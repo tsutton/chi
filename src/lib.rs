@@ -15,6 +15,7 @@ pub mod io;
 
 pub mod choice;
 pub use choice::*;
+mod choice_with_macro;
 
 pub mod spec;
 
