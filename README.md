@@ -26,7 +26,6 @@ The following are missing entirely:
 * Intrinsic functions
 
 The following have only partially support:
-* `Choice` state: only a small subset of comparision operators are implemented.
 * Use of JSON Paths. This is supported, but I'm not sure if the library I use for JSONPath is fully compatible with how AWS does it.
 * `Parameters`: Parameters works, but the context object is currently always the empty JSON object `{}`.
 
